@@ -10,8 +10,6 @@ CSV / TSV viewing and editing come along for free as a clean secondary feature.
 
 **An agent orchestrating sub-agents through GridFlow.** Claude calls `gridflow_openWorkflow`, you confirm the plan with **Start Workflow ▸**, and the grid becomes a live dashboard as each `gridflow_updateRow` lands — rows go `running → done` and unblock their dependents.
 
-![The Claude VS Code extension driving a GridFlow sub-agent workflow, rows updating live](media/agent-orchestration.gif)
-
 **Open a workflow from the Command Palette.** Everything runs inside VS Code, themed to match your editor.
 
 ![Opening a GridFlow workflow from the VS Code Command Palette and expanding a work item](media/ide-hero.gif)
@@ -199,20 +197,6 @@ The tool times out after 30 minutes if no input is submitted.
 | `gridflow.defaultTemplate` | `subagent-orchestration` | Template used by `Open New Grid` |
 | `gridflow.csvDelimiter` | `auto` | Delimiter for CSV parsing/export (`auto`, `,`, `;`, `\t`, `\|`) |
 | `gridflow.mcpPort` | `54321` | Port for the local MCP server (Claude Code / desktop). Set to `0` to disable. |
-
-## Building from source
-
-```bash
-npm install
-npm run watch        # rebuild on save (extension + webview)
-npm run typecheck    # type-check both tsconfigs
-npm run build        # production build
-npm run package      # produce .vsix
-```
-
-Press `F5` in VS Code to open an Extension Development Host with GridFlow loaded.
-
-> **Before publishing:** place a `128×128` PNG at `media/icon.png` and set `publisher` in `package.json` to your Marketplace publisher ID.
 
 ## License
 
