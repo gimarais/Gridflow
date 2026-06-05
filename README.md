@@ -198,20 +198,6 @@ The tool times out after 30 minutes if no input is submitted.
 | `gridflow.csvDelimiter` | `auto` | Delimiter for CSV parsing/export (`auto`, `,`, `;`, `\t`, `\|`) |
 | `gridflow.mcpPort` | `54321` | Port for the local MCP server (Claude Code / desktop). Set to `0` to disable. |
 
-## Building from source
-
-```bash
-npm install
-npm run watch        # rebuild on save (extension + webview)
-npm run typecheck    # type-check both tsconfigs
-npm run build        # production build
-npm run package      # produce .vsix
-```
-
-Press `F5` in VS Code to open an Extension Development Host with GridFlow loaded.
-
-> **Before publishing:** place a `128×128` PNG at `media/icon.png` and set `publisher` in `package.json` to your Marketplace publisher ID.
-
 ## License
 
 MIT
