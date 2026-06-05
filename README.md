@@ -10,8 +10,6 @@ CSV / TSV viewing and editing come along for free as a clean secondary feature.
 
 **An agent orchestrating sub-agents through GridFlow.** Claude calls `gridflow_openWorkflow`, you confirm the plan with **Start Workflow ▸**, and the grid becomes a live dashboard as each `gridflow_updateRow` lands — rows go `running → done` and unblock their dependents.
 
-![The Claude VS Code extension driving a GridFlow sub-agent workflow, rows updating live](media/agent-orchestration.gif)
-
 **Open a workflow from the Command Palette.** Everything runs inside VS Code, themed to match your editor.
 
 ![Opening a GridFlow workflow from the VS Code Command Palette and expanding a work item](media/ide-hero.gif)
