@@ -1,0 +1,42 @@
+name: CI
+
+# Runs on every PR into main and on direct pushes to main. Make the `test` job a
+# required status check in branch protection (Settings ▸ Branches) so a red run
+# blocks the merge.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel an in-progress run when new commits are pushed to the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck, build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # The extension tests boot a real VS Code Extension Host (Electron), which needs
+      # a display. xvfb-run provides a virtual one on the headless Linux runner.
+      - name: Test
+        run: xvfb-run -a npm test

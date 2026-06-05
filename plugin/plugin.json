@@ -1,0 +1,9 @@
+{
+  "name": "gridflow-orchestration",
+  "description": "Drives the GridFlow workflow grid: open a workflow, dispatch one sub-agent per row, and report status, files read/modified, and estimated token usage back to the live panel. Load whenever the user asks to orchestrate agents, parallelize work, or run a multi-step task.",
+  "version": "0.1.0",
+  "author": {
+    "name": "George Marais"
+  },
+  "skills": "skills/"
+}

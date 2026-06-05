@@ -1,0 +1,668 @@
+{
+  "name": "gridflow",
+  "displayName": "GridFlow",
+  "description": "An interactive grid for structured data — orchestrate sub-agents, collect typed chat input, and view/edit CSV files inside VS Code.",
+  "version": "0.1.0",
+  "publisher": "george-marais",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization",
+    "AI"
+  ],
+  "keywords": [
+    "grid",
+    "csv",
+    "table",
+    "copilot",
+    "agents",
+    "chat",
+    "structured-data",
+    "language-model"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguage:csv"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "csv",
+        "aliases": [
+          "CSV",
+          "csv"
+        ],
+        "extensions": [
+          ".csv",
+          ".tsv"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "gridflow.open",
+        "title": "GridFlow: Open New Grid",
+        "category": "GridFlow"
+      },
+      {
+        "command": "gridflow.openWithTemplate",
+        "title": "GridFlow: Open From Template…",
+        "category": "GridFlow"
+      },
+      {
+        "command": "gridflow.openWorkflow",
+        "title": "GridFlow: Open AI Workflow…",
+        "category": "GridFlow",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "gridflow.openCsv",
+        "title": "GridFlow: Open Active File in Grid",
+        "category": "GridFlow",
+        "icon": "$(table)"
+      },
+      {
+        "command": "gridflow.openCsvFromExplorer",
+        "title": "Open in GridFlow",
+        "category": "GridFlow"
+      },
+      {
+        "command": "gridflow.manageTemplates",
+        "title": "GridFlow: Manage Templates",
+        "category": "GridFlow"
+      },
+      {
+        "command": "gridflow.showMcpConfig",
+        "title": "GridFlow: Show MCP Configuration",
+        "category": "GridFlow",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "gridflow.configureDesktopApp",
+        "title": "GridFlow: Configure Claude Desktop App",
+        "category": "GridFlow",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "gridflow.openWorkflowFromFile",
+        "title": "Open as GridFlow Workflow",
+        "category": "GridFlow",
+        "icon": "$(list-tree)"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "gridflow.openCsvFromExplorer",
+          "when": "resourceExtname == .csv || resourceExtname == .tsv",
+          "group": "navigation"
+        },
+        {
+          "command": "gridflow.openWorkflowFromFile",
+          "when": "resourceExtname == .json && resourcePath =~ /\\.gridflow/",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "gridflow.openCsv",
+          "when": "resourceExtname == .csv || resourceExtname == .tsv",
+          "group": "navigation"
+        }
+      ]
+    },
+    "customEditors": [
+      {
+        "viewType": "gridflow.csvEditor",
+        "displayName": "GridFlow CSV Editor",
+        "selector": [
+          {
+            "filenamePattern": "*.csv"
+          },
+          {
+            "filenamePattern": "*.tsv"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "gridflow",
+        "name": "gridflow",
+        "fullName": "GridFlow",
+        "description": "Orchestrate sub-agents, create workflows, and work with structured grids. Just describe your task — GridFlow designs and opens the grid for you.",
+        "isSticky": false,
+        "commands": [
+          {
+            "name": "workflow",
+            "description": "Open a new AI workflow grid"
+          },
+          {
+            "name": "grid",
+            "description": "Open a structured input grid for the user to fill in"
+          },
+          {
+            "name": "status",
+            "description": "Read the current state of a workflow"
+          }
+        ]
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "gridflow_openWorkflow",
+        "displayName": "Open AI Workflow (GridFlow)",
+        "modelDescription": "Opens a sub-agent orchestration workflow. Use whenever the user asks to orchestrate agents, parallelize work, or run a multi-step task. Design the grid: choose 'columns' for the work, one 'rows' entry per sub-agent task. Set 'dependsOn' for sequential tasks (0-based indices); omit for parallel. Set 'agent' per row. The grid BLOCKS until the user clicks 'Start Workflow', then returns the grid JSON with readyRowIds. AFTER THAT: for each row in readyRowIds — (1) call gridflow_updateRow(status:'running') immediately, (2) run the sub-agent, (3) call gridflow_updateRow(status:'done'/'failed', outputs, provenance, usage). After each updateRow check its readyRowIds for newly unblocked tasks. Continue until all rows are terminal. PROVENANCE: Always append to every sub-agent 'inputs': \"At the very end of your response output: <gf-prov>{\\\"filesRead\\\":[\\\"path.ts\\\"],\\\"filesModified\\\":[],\\\"toolCalls\\\":[\\\"Read\\\"]}</gf-prov> Required.\" Extract that line from the sub-agent output, parse it for updateRow provenance fields, strip it from outputs. CHAT: One short sentence per major step max; all findings go in updateRow outputs for the panel.",
+        "userDescription": "Opens a sub-agent orchestration grid and waits for you to assign agents before the AI starts.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gridflowWorkflow",
+        "icon": "$(list-tree)",
+        "tags": [
+          "grid",
+          "workflow",
+          "orchestration",
+          "gridflow"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Workflow name / slug (e.g. 'auth-refactor')."
+            },
+            "title": {
+              "type": "string",
+              "description": "Human-readable panel title. Defaults to name."
+            },
+            "columns": {
+              "type": "array",
+              "description": "Design the columns to represent what the user asked for (e.g. Task, Objective, Target file). You choose these — there is no fixed template.",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "text",
+                      "select",
+                      "number",
+                      "boolean"
+                    ]
+                  },
+                  "options": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "rows": {
+              "type": "array",
+              "description": "One row per sub-agent task. Keys matching your column names are cell values. Reserved keys: 'agent' (which sub-agent runs it), 'model', 'inputs' (prompt for the sub-agent), 'dependsOn' (0-based indices of earlier rows that must finish first; omit for parallel tasks).",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "agent": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "inputs": {
+                    "type": "string"
+                  },
+                  "dependsOn": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            },
+            "instructions": {
+              "type": "string",
+              "description": "One-line instruction shown above the grid."
+            }
+          }
+        }
+      },
+      {
+        "name": "gridflow_addRows",
+        "displayName": "Add Workflow Tasks (GridFlow)",
+        "modelDescription": "Adds more sub-agent task rows to an already-open workflow. Use when orchestration reveals new work to dispatch. The grid updates live. dependsOn uses 0-based indices within the rows you pass.",
+        "userDescription": "Lets the AI add tasks to a running workflow.",
+        "canBeReferencedInPrompt": false,
+        "icon": "$(add)",
+        "tags": [
+          "grid",
+          "workflow",
+          "gridflow"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "workflowId",
+            "rows"
+          ],
+          "properties": {
+            "workflowId": {
+              "type": "string",
+              "description": "The workflowId returned by gridflow_openWorkflow."
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "agent": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "inputs": {
+                    "type": "string"
+                  },
+                  "dependsOn": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "gridflow_updateRow",
+        "displayName": "Update Workflow Row (GridFlow)",
+        "modelDescription": "Reports a sub-agent's progress on a workflow row. Call TWICE per row: (1) status:'running' when dispatch begins, (2) status:'done'/'failed' on completion. On completion: populate provenance.filesRead (every file the sub-agent accessed — extract from the <gf-prov> tag in its output if you included the provenance instruction), provenance.filesModified, provenance.toolCalls, outputs (strip the <gf-prov> line first), and estimated usage (best-effort token estimates) if derivable. Leaving provenance empty shows '0 files read' to the user. Keep chat output to one sentence — results go in outputs for the panel.",
+        "userDescription": "Lets the AI report a workflow row's progress back to the grid.",
+        "canBeReferencedInPrompt": false,
+        "icon": "$(check)",
+        "tags": [
+          "grid",
+          "workflow",
+          "gridflow"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "workflowId",
+            "rowId"
+          ],
+          "properties": {
+            "workflowId": {
+              "type": "string",
+              "description": "The workflowId returned by gridflow_openWorkflow."
+            },
+            "rowId": {
+              "type": "string",
+              "description": "The row id from the openWorkflow response."
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "queued",
+                "running",
+                "blocked",
+                "done",
+                "failed",
+                "cancelled"
+              ],
+              "description": "Send 'running' when dispatching the sub-agent, then 'done'/'failed' when it returns."
+            },
+            "agent": {
+              "type": "string",
+              "description": "The sub-agent that ran this row (e.g. 'Explore', 'general-purpose')."
+            },
+            "model": {
+              "type": "string",
+              "description": "Model used."
+            },
+            "inputs": {
+              "type": "string",
+              "description": "The prompt/context handed to the sub-agent."
+            },
+            "outputs": {
+              "type": "string",
+              "description": "What the sub-agent produced."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One-line outcome."
+            },
+            "dependsOn": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Row ids this row depends on."
+            },
+            "startedAt": {
+              "type": "string"
+            },
+            "finishedAt": {
+              "type": "string"
+            },
+            "durationMs": {
+              "type": "number",
+              "description": "Optional; GridFlow computes it from running→done."
+            },
+            "provenance": {
+              "type": "object",
+              "properties": {
+                "prompt": {
+                  "type": "string"
+                },
+                "context": {
+                  "type": "string"
+                },
+                "filesRead": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "note": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "path"
+                    ]
+                  }
+                },
+                "filesModified": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "change": {
+                        "type": "string",
+                        "enum": [
+                          "modified",
+                          "created",
+                          "deleted"
+                        ]
+                      },
+                      "note": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "path"
+                    ]
+                  }
+                },
+                "toolCalls": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "input": {
+                        "type": "string"
+                      },
+                      "output": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ]
+                  }
+                },
+                "subAgents": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "usage": {
+              "type": "object",
+              "properties": {
+                "inputTokens": {
+                  "type": "number"
+                },
+                "outputTokens": {
+                  "type": "number"
+                },
+                "totalTokens": {
+                  "type": "number"
+                },
+                "costUsd": {
+                  "type": "number"
+                }
+              }
+            },
+            "logs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "level": {
+                    "type": "string",
+                    "enum": [
+                      "debug",
+                      "info",
+                      "warn",
+                      "error"
+                    ]
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "message"
+                ]
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "gridflow_getWorkflow",
+        "displayName": "Read AI Workflow (GridFlow)",
+        "modelDescription": "Returns the current state of all rows in a workflow — status, assigned agent, inputs, outputs, cost, run count — as JSON. Use to read structured context from a running workflow (e.g. check which rows are done before starting the next phase) or to resume a workflow.",
+        "userDescription": "Lets the AI read the current state of a GridFlow workflow.",
+        "canBeReferencedInPrompt": false,
+        "icon": "$(eye)",
+        "tags": [
+          "grid",
+          "workflow",
+          "gridflow"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "workflowId"
+          ],
+          "properties": {
+            "workflowId": {
+              "type": "string",
+              "description": "The workflowId returned by gridflow_openWorkflow."
+            }
+          }
+        }
+      },
+      {
+        "name": "gridflow_collectStructuredInput",
+        "displayName": "Collect Structured Input (GridFlow)",
+        "modelDescription": "Opens an interactive grid in the editor so the user can fill in structured input — rows of typed cells (text, select, number, boolean). Use when the user needs to provide multiple related pieces of structured data (e.g. a list of sub-agent tasks to orchestrate, API endpoints to design, test cases to enumerate). The tool blocks until the user clicks 'Send to Chat' and then returns the grid as a JSON array of objects. Prefer this over asking the user to paste a table inline. You may pass a template (one of the registered template ids), an initial set of columns, and/or initial rows to pre-populate.",
+        "userDescription": "Opens GridFlow so you can fill in structured data and send it back to the chat.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gridflow",
+        "icon": "$(table)",
+        "tags": [
+          "grid",
+          "input",
+          "gridflow"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "description": "Title shown at the top of the grid panel."
+            },
+            "templateId": {
+              "type": "string",
+              "description": "Optional id of a known template to pre-populate the grid. Built-in ids: 'subagent-orchestration', 'api-endpoints', 'test-cases'."
+            },
+            "columns": {
+              "type": "array",
+              "description": "Optional column definitions. If omitted and templateId is omitted, a default text-only schema is used.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "text",
+                      "select",
+                      "number",
+                      "boolean"
+                    ]
+                  },
+                  "options": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "For type='select': dropdown options."
+                  },
+                  "placeholder": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "type"
+                ]
+              }
+            },
+            "rows": {
+              "type": "array",
+              "description": "Optional initial rows. Each row is an object keyed by column id (or name).",
+              "items": {
+                "type": "object"
+              }
+            },
+            "instructions": {
+              "type": "string",
+              "description": "Optional one-line hint shown above the grid telling the user what they're filling in."
+            }
+          }
+        }
+      }
+    ],
+    "configuration": {
+      "title": "GridFlow",
+      "properties": {
+        "gridflow.defaultTemplate": {
+          "type": "string",
+          "default": "subagent-orchestration",
+          "description": "Template id used when opening a fresh grid without a template."
+        },
+        "gridflow.csvDelimiter": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            ",",
+            ";",
+            "\t",
+            "|"
+          ],
+          "description": "Delimiter used when parsing/serializing CSV. 'auto' detects from file contents."
+        },
+        "gridflow.mcpPort": {
+          "type": "number",
+          "default": 54321,
+          "description": "Port for the local MCP server that exposes GridFlow to Claude Code and other MCP clients. Set to 0 to disable the MCP server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.mjs --production",
+    "build:dev": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.webview.json && tsc --noEmit -p tsconfig.test.json",
+    "compile-tests": "tsc -p tsconfig.test.json",
+    "watch-tests": "tsc -p tsconfig.test.json -w",
+    "pretest": "npm run compile-tests",
+    "test": "vscode-test",
+    "package": "vsce package",
+    "demo:record": "node scripts/demo/record.mjs",
+    "demo": "npm run build:dev && node scripts/demo/record.mjs",
+    "demo:ide": "node scripts/demo/ide/record-ide.mjs"
+  },
+  "dependencies": {
+    "papaparse": "^5.4.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.11.30",
+    "@types/papaparse": "^5.3.14",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/vscode": "^1.95.0",
+    "@vscode/test-cli": "^0.0.10",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.24.0",
+    "gifski": "^1.7.1",
+    "mocha": "^10.8.2",
+    "playwright": "^1.60.0",
+    "typescript": "^5.5.4"
+  }
+}
