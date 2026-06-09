@@ -15,6 +15,9 @@ node_modules/**
 tsconfig*.json
 esbuild.mjs
 *.vsix
-**/*.map
 **/*.ts
-!dist/**
+dist/**
+!dist/extension.js
+!dist/webview.js
+!dist/webview.css
+scripts/**

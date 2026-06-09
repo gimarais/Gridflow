@@ -2,7 +2,7 @@
 
 All notable changes to GridFlow are documented here.
 
-## [Unreleased]
+## [0.1.0] — 2026-06-09
 
 ### Changed
 - **Workflows are now sub-agent orchestration, not a to-do list.** `gridflow_openWorkflow` lets the agent **design the grid columns** to match the user's request (no fixed template) and add one row per sub-agent task with `agent` and `dependsOn` set. Removed the canned `AI Workflow` built-in template and its default Research/Implement/Test/Review rows.
@@ -36,7 +36,7 @@ All notable changes to GridFlow are documented here.
 - **"Agent is waiting" banner** and a mode-aware **Start Workflow ▸** submit button in workflow grids.
 - `gridflow.mcpPort` setting.
 
-## [0.1.0] — 2026-05-21
+## [0.0.1] — 2026-05-21
 
 ### Added
 - Interactive grid editor with text, select, number, and boolean column types
