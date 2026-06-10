@@ -2,7 +2,7 @@
   "name": "gridflow",
   "displayName": "GridFlow",
   "description": "An interactive grid for structured data — orchestrate sub-agents, collect typed chat input, and view/edit CSV files inside VS Code.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "OkayExtensions",
   "license": "MIT",
   "icon": "media/icon.png",
