@@ -97,5 +97,33 @@ describe('csv', () => {
       const out = serializeCsv(parsed.columns, parsed.rows, ',');
       assert.equal(out, text);
     });
+
+    describe('formula-injection guard (safe export)', () => {
+      const textCol: ColumnDef[] = [{ id: 'c1', name: 'Value', type: 'text' }];
+
+      it('escapes string cells starting with =, +, -, or @', () => {
+        const rows: Row[] = [
+          { id: 'r1', cells: { c1: '=SUM(A1:A9)' } },
+          { id: 'r2', cells: { c1: '+cmd' } },
+          { id: 'r3', cells: { c1: '-payload' } },
+          { id: 'r4', cells: { c1: '@import' } },
+        ];
+        const out = serializeCsv(textCol, rows, ',', { safe: true });
+        assert.equal(out, "Value\n'=SUM(A1:A9)\n'+cmd\n'-payload\n'@import");
+      });
+
+      it('leaves ordinary strings and non-string cells untouched', () => {
+        const rows: Row[] = [{ id: 'r1', cells: { c1: 'plain text' } }];
+        assert.equal(serializeCsv(textCol, rows, ',', { safe: true }), 'Value\nplain text');
+        // Negative numbers are numeric cells — never escaped.
+        const numRows: Row[] = [{ id: 'r1', cells: { c3: -5 } }];
+        assert.equal(serializeCsv(columns.slice(2), numRows, ',', { safe: true }), 'Qty\n-5');
+      });
+
+      it('keeps cells verbatim when safe mode is off (editor round-trip path)', () => {
+        const rows: Row[] = [{ id: 'r1', cells: { c1: '=SUM(A1)' } }];
+        assert.equal(serializeCsv(textCol, rows, ','), 'Value\n=SUM(A1)');
+      });
+    });
   });
 });

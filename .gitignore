@@ -10,6 +10,10 @@ out-webview/
 # Sidecars written by integration tests into the test workspace
 test-workspace/.gridflow/
 
+# CLI tool — kept LOCAL only, future premium feature. The MCP server (mcp/)
+# is public; the CLI UI (cli/) is gated.
+cli/**
+
 # Demo GIF recorder tooling — kept LOCAL only, never published to the public repo.
 # The generated GIFs in media/ ARE committed; only the recorder source is ignored.
 scripts/demo/

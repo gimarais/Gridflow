@@ -1,5 +1,8 @@
 import * as vscode from 'vscode';
 import { GridSnapshot } from '../shared/types';
+import { sanitizeSnapshot } from '../shared/sanitize';
+import { KeyedMutex } from '../shared/mutex';
+import { slugify } from '../shared/workflowCore';
 
 /**
  * Persistence for workflow grids. Each workflow lives in a human-readable JSON
@@ -10,6 +13,8 @@ import { GridSnapshot } from '../shared/types';
  */
 export const WORKFLOW_DIR = '.gridflow';
 
+export { slugify };
+
 export interface WorkflowHandle {
   /** URI of the sidecar JSON file. */
   uri: vscode.Uri;
@@ -19,15 +24,15 @@ export interface WorkflowHandle {
   snapshot?: GridSnapshot;
 }
 
-export function slugify(name: string): string {
-  return (
-    name
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 64) || 'workflow'
-  );
+/**
+ * Per-slug write lock. Every load-modify-write of a sidecar must go through
+ * this — parallel `updateRow` calls (the flagship orchestration path) and the
+ * panel's debounced save would otherwise clobber each other's writes.
+ */
+const workflowMutex = new KeyedMutex();
+
+export function withWorkflowLock<T>(slug: string, fn: () => Promise<T>): Promise<T> {
+  return workflowMutex.run(slug, fn);
 }
 
 function workflowFolder(): vscode.Uri | undefined {
@@ -62,9 +67,13 @@ export async function loadWorkflow(slug: string): Promise<GridSnapshot | undefin
   if (!uri) return undefined;
   try {
     const buf = await vscode.workspace.fs.readFile(uri);
-    const parsed = JSON.parse(new TextDecoder().decode(buf)) as GridSnapshot;
-    // Force the kind so an older/hand-edited file still renders as a workflow.
-    return { ...parsed, kind: 'workflow' };
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(buf));
+    // The sidecar comes from the workspace — a cloned repo may carry a hostile
+    // or malformed file. Sanitize instead of blind-casting, and force the kind
+    // so an older/hand-edited file still renders as a workflow.
+    const snapshot = sanitizeSnapshot(parsed);
+    if (!snapshot) return undefined;
+    return { ...snapshot, kind: 'workflow' };
   } catch {
     return undefined;
   }

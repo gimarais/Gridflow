@@ -1,23 +1,35 @@
 import * as http from 'http';
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
-import { ORCHESTRATOR_SYSTEM_PROMPT } from './chatParticipant';
+import { ORCHESTRATOR_SYSTEM_PROMPT } from '../shared/orchestratorPrompt';
+import { MCP_PROMPTS, MCP_TOOLS } from '../shared/mcpSchemas';
+import { renderDashboardHtml } from '../shared/dashboardHtml';
+import { workflowStats, workflowToText } from '../shared/workflowCore';
 import { GridPanel } from './gridPanel';
 import { TemplateService } from './templates';
 import { ColumnDef, GridSnapshot, RowData, makeId } from '../shared/types';
 import { extractHashTokens } from './hashCompletions';
+import { FEATURE_MCP_TOOLS } from './featureTools';
+import { listWorkflows, loadWorkflow } from './workflowStore';
 import {
   WorkflowOrchestrator,
   OpenWorkflowInput,
   UpdateRowInput,
   GetWorkflowInput,
   AddRowsInput,
+  ReplayRowInput,
+  FanOutInput,
 } from './workflowOrchestrator';
 
 const TOOL_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** Cap on a single MCP request body to avoid unbounded memory growth. */
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
+
+/** Cap concurrent SSE clients so a buggy/looping client can't exhaust sockets. */
+const MAX_SSE_CLIENTS = 16;
+
+export { MCP_PROMPTS, MCP_TOOLS };
 
 /** Constant-time string compare that never throws on length mismatch. */
 function timingSafeEq(a: string, b: string): boolean {
@@ -35,34 +47,41 @@ type CollectInput = {
   instructions?: string;
 };
 
+type JsonRpcMessage = { id?: unknown; method: string; params?: unknown };
+
 /**
- * HTTP+SSE MCP server that exposes GridFlow to Claude Code and the Claude desktop app.
+ * Local HTTP server that exposes GridFlow beyond the webview:
+ *
+ *   MCP (agents — strict auth, no browser may connect):
+ *     GET  /sse + POST /message — legacy HTTP+SSE transport (Claude desktop via stdio proxy)
+ *     POST /mcp                 — Streamable HTTP transport (2025-03-26) for modern MCP
+ *                                 clients (Claude Code, Gemini CLI, Codex, Cline, …) — no proxy needed
+ *
+ *   Read-only surfaces (token-gated, same-origin browser access allowed):
+ *     GET /api/workflows[/:slug] — workflow state as JSON for external platforms
+ *     GET /dashboard             — self-contained live web dashboard
+ *
  * All workflow logic lives in the shared WorkflowOrchestrator so the MCP surface and
  * the Copilot LM-tool surface behave identically.
- *
- * Tools:
- *   gridflow_openWorkflow   — opens the grid and WAITS for the user to fill in & submit
- *   gridflow_updateRow      — agent reports status/provenance/cost; pushed live
- *   gridflow_getWorkflow    — read current grid state as structured context
- *   gridflow_collectStructuredInput — one-shot form fill (legacy)
  */
 export class GridFlowMcpServer {
   private server: http.Server | null = null;
   private sseClients = new Map<string, http.ServerResponse>();
-
-  /**
-   * Capability token required on every /sse and /message request. Written to
-   * ~/.gridflow/token (mode 0600) at activation; the stdio proxy reads it and sends
-   * it as the `x-gridflow-token` header. Browsers cannot read that file or set the
-   * header on an EventSource, so a malicious web page cannot drive this server.
-   */
-  readonly token = crypto.randomBytes(24).toString('hex');
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly templates: TemplateService,
     readonly port: number,
     private readonly orchestrator: WorkflowOrchestrator,
+    /**
+     * Capability token required on every authenticated request. Persisted to
+     * ~/.gridflow/token (mode 0600) so HTTP-transport client configs survive
+     * window reloads; the stdio proxy reads it fresh on each launch and sends
+     * it as the `x-gridflow-token` header. Browsers cannot read that file, so
+     * only a user who can already read local files (same trust domain) can
+     * connect.
+     */
+    readonly token: string,
   ) {}
 
   async start(): Promise<void> {
@@ -78,12 +97,15 @@ export class GridFlowMcpServer {
     this.server = null;
   }
 
+  dashboardUrl(): string {
+    return `http://127.0.0.1:${this.port}/dashboard?token=${this.token}`;
+  }
+
   /* ── HTTP routing ──────────────────────────────────────────────────── */
 
   private dispatch(req: http.IncomingMessage, res: http.ServerResponse): void {
-    // No CORS headers on purpose: the legitimate client is the local stdio proxy
-    // (a Node process), never a browser. Without Access-Control-Allow-Origin a web
-    // page cannot read responses, and the checks in authorize() block it outright.
+    // No Access-Control-Allow-Origin is ever set: foreign web origins can
+    // neither read responses nor pass authorize*() below.
     if (req.method === 'OPTIONS') { res.writeHead(403); res.end(); return; }
 
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${this.port}`);
@@ -91,38 +113,115 @@ export class GridFlowMcpServer {
     // /health stays open (no sensitive data) so connectivity can be probed.
     if (req.method === 'GET' && url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', server: 'gridflow-mcp', version: '0.1.0' }));
+      res.end(JSON.stringify({ status: 'ok', server: 'gridflow-mcp', version: '0.3.0' }));
       return;
     }
 
-    if (!this.authorize(req)) { res.writeHead(403); res.end(); return; }
+    // Read-only surfaces: token via header or query, same-origin browsers allowed.
+    if (req.method === 'GET' && (url.pathname === '/dashboard' || url.pathname.startsWith('/api/'))) {
+      if (!this.authorizeRead(req, url)) { res.writeHead(403); res.end(); return; }
+      if (url.pathname === '/dashboard') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(renderDashboardHtml());
+      } else {
+        void this.handleApi(url, res);
+      }
+      return;
+    }
+
+    // MCP transports: strict auth (no browser may connect at all).
+    if (!this.authorizeMcp(req)) { res.writeHead(403); res.end(); return; }
 
     if (req.method === 'GET' && url.pathname === '/sse') {
       this.handleSse(req, res);
     } else if (req.method === 'POST' && url.pathname === '/message') {
       this.handlePost(req, res, url.searchParams.get('sessionId') ?? '');
+    } else if (req.method === 'POST' && url.pathname === '/mcp') {
+      this.handleStreamableHttp(req, res);
     } else {
       res.writeHead(404); res.end();
     }
   }
 
   /**
-   * Gate /sse and /message against browser-driven (CSRF) and DNS-rebinding attacks.
-   * The stdio proxy sends no Origin, connects to loopback, and carries the token.
+   * Gate the MCP transports against browser-driven (CSRF) and DNS-rebinding attacks.
+   * Legitimate clients (the stdio proxy, MCP CLIs) send no Origin, connect to
+   * loopback, and carry the token header.
    */
-  private authorize(req: http.IncomingMessage): boolean {
+  private authorizeMcp(req: http.IncomingMessage): boolean {
     // Any browser fetch / EventSource attaches an Origin header; reject those.
     if (req.headers.origin !== undefined) return false;
-    // Anti-DNS-rebinding: Host must be loopback on our port.
-    const host = req.headers.host ?? '';
-    if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) return false;
-    // Shared-secret capability token (timing-safe compare).
+    if (!this.hostIsLoopback(req)) return false;
     const provided = req.headers['x-gridflow-token'];
     return typeof provided === 'string' && timingSafeEq(provided, this.token);
   }
 
+  /**
+   * Gate the read-only GET surfaces. Browsers are allowed (the dashboard runs
+   * in one) but only same-origin: a foreign origin's fetch carries its own
+   * Origin header and is rejected — and without CORS headers it couldn't read
+   * the response anyway. The token may come via header or ?token= (the
+   * dashboard URL embeds it, since browsers can't set headers on navigation).
+   */
+  private authorizeRead(req: http.IncomingMessage, url: URL): boolean {
+    if (!this.hostIsLoopback(req)) return false;
+    const origin = req.headers.origin;
+    if (origin !== undefined && !this.isOwnOrigin(origin)) return false;
+    const header = req.headers['x-gridflow-token'];
+    if (typeof header === 'string') return timingSafeEq(header, this.token);
+    const query = url.searchParams.get('token');
+    return typeof query === 'string' && timingSafeEq(query, this.token);
+  }
+
+  private hostIsLoopback(req: http.IncomingMessage): boolean {
+    const host = req.headers.host ?? '';
+    return host === `127.0.0.1:${this.port}` || host === `localhost:${this.port}`;
+  }
+
+  private isOwnOrigin(origin: string): boolean {
+    return origin === `http://127.0.0.1:${this.port}` || origin === `http://localhost:${this.port}`;
+  }
+
+  /* ── read-only JSON API ────────────────────────────────────────────── */
+
+  private async handleApi(url: URL, res: http.ServerResponse): Promise<void> {
+    try {
+      if (url.pathname === '/api/workflows') {
+        const slugs = await listWorkflows();
+        const items = await Promise.all(
+          slugs.map(async (slug) => {
+            const snapshot = await loadWorkflow(slug);
+            return snapshot
+              ? { slug, title: snapshot.title ?? slug, stats: workflowStats(snapshot) }
+              : null;
+          }),
+        );
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(items.filter((x) => x !== null)));
+        return;
+      }
+      const match = url.pathname.match(/^\/api\/workflows\/([a-z0-9-]+)$/);
+      if (match) {
+        const snapshot = await loadWorkflow(match[1]);
+        if (!snapshot) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end('{"error":"not found"}'); return; }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(workflowToText(match[1], snapshot, 'current'));
+        return;
+      }
+      res.writeHead(404); res.end();
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+  }
+
+  /* ── legacy HTTP+SSE transport ─────────────────────────────────────── */
+
   private handleSse(req: http.IncomingMessage, res: http.ServerResponse): void {
-    const clientId = makeId('sess');
+    if (this.sseClients.size >= MAX_SSE_CLIENTS) {
+      res.writeHead(503); res.end(); return;
+    }
+    const clientId = crypto.randomBytes(12).toString('hex');
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -137,34 +236,80 @@ export class GridFlowMcpServer {
     this.sseClients.get(clientId)?.write(`event: message\ndata: ${JSON.stringify(obj)}\n\n`);
   }
 
-  private handlePost(req: http.IncomingMessage, res: http.ServerResponse, clientId: string): void {
-    let body = '';
-    let size = 0;
-    let aborted = false;
-    req.on('data', (c: Buffer) => {
-      if (aborted) return;
-      size += c.length;
-      if (size > MAX_BODY_BYTES) {
-        aborted = true;
-        res.writeHead(413); res.end();
-        req.destroy();
-        return;
-      }
-      body += c.toString();
+  /** Read a request body, enforcing MAX_BODY_BYTES (413 + undefined when exceeded). */
+  private readBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      let body = '';
+      let size = 0;
+      let aborted = false;
+      req.on('data', (c: Buffer) => {
+        if (aborted) return;
+        size += c.length;
+        if (size > MAX_BODY_BYTES) {
+          aborted = true;
+          res.writeHead(413); res.end();
+          req.destroy();
+          resolve(undefined);
+          return;
+        }
+        body += c.toString();
+      });
+      req.on('end', () => resolve(aborted ? undefined : body));
+      req.on('error', () => resolve(undefined));
     });
-    req.on('end', async () => {
-      if (aborted) return;
+  }
+
+  private handlePost(req: http.IncomingMessage, res: http.ServerResponse, clientId: string): void {
+    void this.readBody(req, res).then(async (body) => {
+      if (body === undefined) return;
       res.writeHead(202); res.end();
-      let msg: { id?: unknown; method: string; params?: unknown };
+      let msg: JsonRpcMessage;
       try { msg = JSON.parse(body); } catch { return; }
       const reply = await this.handle(msg);
       if (reply !== null) this.sendSse(clientId, reply);
     });
   }
 
+  /* ── Streamable HTTP transport (2025-03-26) ────────────────────────── */
+
+  /**
+   * POST /mcp — each request gets its own SSE-framed response stream, so
+   * long-blocking tools (openWorkflow waits for "Start Workflow") work without
+   * a separate event channel or the stdio proxy. Stateless: no session ids.
+   */
+  private handleStreamableHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
+    void this.readBody(req, res).then(async (body) => {
+      if (body === undefined) return;
+      let parsed: unknown;
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }));
+        return;
+      }
+      const messages = (Array.isArray(parsed) ? parsed : [parsed]) as JsonRpcMessage[];
+      const hasRequest = messages.some((m) => m && typeof m === 'object' && m.id !== undefined);
+      if (!hasRequest) {
+        // Notifications / responses only — acknowledge with no body.
+        for (const m of messages) void this.handle(m);
+        res.writeHead(202); res.end();
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+      for (const m of messages) {
+        const reply = await this.handle(m);
+        if (reply !== null) res.write(`event: message\ndata: ${JSON.stringify(reply)}\n\n`);
+      }
+      res.end();
+    });
+  }
+
   /* ── MCP method dispatch ───────────────────────────────────────────── */
 
-  private async handle(msg: { id?: unknown; method: string; params?: unknown }): Promise<unknown> {
+  private async handle(msg: JsonRpcMessage): Promise<unknown> {
     const id = (msg.id !== undefined ? msg.id : null) as string | number | null;
 
     switch (msg.method) {
@@ -174,7 +319,7 @@ export class GridFlowMcpServer {
           result: {
             protocolVersion: '2024-11-05',
             capabilities: { tools: {}, prompts: {} },
-            serverInfo: { name: 'gridflow', version: '0.1.0' },
+            serverInfo: { name: 'gridflow', version: '0.3.0' },
           },
         };
 
@@ -184,8 +329,10 @@ export class GridFlowMcpServer {
       case 'ping':
         return { jsonrpc: '2.0', id, result: {} };
 
-      case 'tools/list':
-        return { jsonrpc: '2.0', id, result: { tools: MCP_TOOLS } };
+      case 'tools/list': {
+        const featureTools = FEATURE_MCP_TOOLS.map((t) => t.schema);
+        return { jsonrpc: '2.0', id, result: { tools: [...MCP_TOOLS, ...featureTools] } };
+      }
 
       case 'tools/call': {
         const p = msg.params as { name: string; arguments?: Record<string, unknown> };
@@ -199,17 +346,32 @@ export class GridFlowMcpServer {
             case 'gridflow_addRows':
               text = await this.orchestrator.addRows(args as unknown as AddRowsInput);
               break;
+            case 'gridflow_fanOut':
+              text = await this.orchestrator.fanOut(args as unknown as FanOutInput);
+              break;
             case 'gridflow_updateRow':
               text = await this.orchestrator.updateRow(args as unknown as UpdateRowInput);
               break;
             case 'gridflow_getWorkflow':
               text = await this.orchestrator.getWorkflow(args as unknown as GetWorkflowInput);
               break;
+            case 'gridflow_replayRow':
+              text = await this.orchestrator.replayRow(args as unknown as ReplayRowInput);
+              break;
             case 'gridflow_collectStructuredInput':
               text = await this.invokeCollectInput(args as unknown as CollectInput);
               break;
-            default:
+            default: {
+              // Dispatch to a feature-contributed tool (verifier, advisor, governance).
+              const featureTool = FEATURE_MCP_TOOLS.find(
+                (t) => (t.schema as { name?: string })?.name === p?.name,
+              );
+              if (featureTool) {
+                text = await featureTool.handler(args);
+                break;
+              }
               return { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown tool: ${p?.name}` } };
+            }
           }
           return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } };
         } catch (err) {
@@ -351,214 +513,3 @@ function snapshotToText(snapshot: GridSnapshot): string {
     2,
   );
 }
-
-/* ── MCP prompt registry ─────────────────────────────────────────────── */
-
-export const MCP_PROMPTS = [
-  {
-    name: 'gridflow-orchestrate',
-    description:
-      'Configure Claude as a GridFlow workflow orchestrator. After loading this prompt, Claude will ' +
-      'proactively use gridflow_openWorkflow, gridflow_updateRow, and related tools whenever you ' +
-      'describe a multi-step task — no need to name specific tools yourself.',
-    arguments: [
-      {
-        name: 'task',
-        description: 'Optional: the task or goal you want to orchestrate (e.g. "refactor the auth system").',
-        required: false,
-      },
-    ],
-  },
-];
-
-/* ── MCP tool schemas ────────────────────────────────────────────────── */
-
-// Shared shape for a sub-agent task row across openWorkflow / addRows.
-const ROW_ITEM_SCHEMA = {
-  type: 'object',
-  description:
-    'A sub-agent task. Keys matching your column names become cell values (e.g. {"Task":"…"}). ' +
-    'Reserved keys configure the sub-agent: "agent" (which agent/sub-agent runs it), "model", ' +
-    '"inputs" (the prompt/context to hand the sub-agent), and "dependsOn" (array of 0-based indices ' +
-    'of earlier rows that must finish first — omit for rows that can run in parallel).',
-  properties: {
-    agent: { type: 'string' },
-    model: { type: 'string' },
-    inputs: { type: 'string' },
-    dependsOn: { type: 'array', items: { type: 'number' } },
-  },
-  additionalProperties: true,
-};
-
-const COLUMNS_SCHEMA = {
-  type: 'array',
-  description:
-    'Design the columns to represent exactly what the user asked for (e.g. Task, Objective, Target file, Acceptance criteria). ' +
-    'You choose these — there is no fixed template.',
-  items: {
-    type: 'object',
-    required: ['name'],
-    properties: {
-      name: { type: 'string' },
-      type: { type: 'string', enum: ['text', 'select', 'number', 'boolean'] },
-      options: { type: 'array', items: { type: 'string' } },
-    },
-  },
-};
-
-export const MCP_TOOLS = [
-  {
-    name: 'gridflow_openWorkflow',
-    description:
-      'Opens a sub-agent orchestration workflow grid. Use whenever the user asks to orchestrate agents, parallelize work, or run a multi-step task. ' +
-      'YOU design the grid: choose columns for the work, one row per sub-agent task. ' +
-      'Set "dependsOn" for sequential tasks (0-based indices); omit for tasks that run in parallel. Set "agent" per row.\n\n' +
-      'CALL SEQUENCE after the user clicks "Start Workflow" (the tool unblocks and returns the grid JSON with readyRowIds):\n' +
-      '1. For each row in readyRowIds, dispatch it in parallel:\n' +
-      '   a. Call gridflow_updateRow(workflowId, rowId, status:"running") immediately.\n' +
-      '   b. Run the sub-agent with the row\'s inputs.\n' +
-      '   c. Call gridflow_updateRow(workflowId, rowId, status:"done"/"failed", outputs:"...", provenance:{...}, usage:{...}).\n' +
-      '2. After each updateRow response, dispatch any new rowIds in its readyRowIds list.\n' +
-      '3. Continue until all rows are terminal.\n\n' +
-      'PROVENANCE — sub-agents do NOT auto-report file access. ALWAYS append to the end of every "inputs" prompt:\n' +
-      '"After finishing, output exactly this line at the very end of your response:\n' +
-      '<gf-prov>{\"filesRead\":[\"path/a.ts\",\"path/b.ts\"],\"filesModified\":[\"path/c.ts\"],\"toolCalls\":[\"Read\",\"Bash\"]}</gf-prov>\n' +
-      'Include every file you accessed. Required for the audit trail."\n' +
-      'When the sub-agent returns, extract that line, parse the JSON, pass it to updateRow\'s provenance fields, and strip the line from outputs.\n\n' +
-      'CHAT OUTPUT: Keep chat narration minimal — one short sentence per major step (e.g. "Dispatching 3 sub-agents."). ' +
-      'Put all findings and results in updateRow outputs so the user can read them in the VS Code panel.',
-    inputSchema: {
-      type: 'object',
-      required: ['name'],
-      properties: {
-        name: { type: 'string', description: 'Workflow name / slug (e.g. "auth-refactor").' },
-        title: { type: 'string', description: 'Human-readable panel title. Defaults to name.' },
-        columns: COLUMNS_SCHEMA,
-        rows: { type: 'array', description: 'One row per sub-agent task.', items: ROW_ITEM_SCHEMA },
-        instructions: { type: 'string', description: 'One-line instruction shown above the grid.' },
-      },
-    },
-  },
-  {
-    name: 'gridflow_addRows',
-    description:
-      'Adds more sub-agent task rows to an already-open workflow. Use when orchestration reveals new work to dispatch ' +
-      '(e.g. a research row uncovers three follow-up tasks). The grid updates live. dependsOn here uses 0-based indices within the rows you pass.',
-    inputSchema: {
-      type: 'object',
-      required: ['workflowId', 'rows'],
-      properties: {
-        workflowId: { type: 'string', description: 'The workflowId returned by gridflow_openWorkflow.' },
-        rows: { type: 'array', items: ROW_ITEM_SCHEMA },
-      },
-    },
-  },
-  {
-    name: 'gridflow_updateRow',
-    description:
-      'Reports a sub-agent\'s progress on a workflow row. Call it TWICE per row: ' +
-      '(1) status:"running" the moment work begins — GridFlow timestamps this and measures wall-clock duration automatically. ' +
-      '(2) status:"done" or "failed" when work is complete.\n\n' +
-      'On the COMPLETION call you MUST populate provenance — this is the audit trail the user sees in the panel:\n' +
-      '• provenance.filesRead — every file path you READ during this task (every Read tool call, every grep/find/cat via Bash). ' +
-        'Leaving this empty shows "0 files read" to the user.\n' +
-      '• provenance.filesModified — every file you CREATED, EDITED, or DELETED (Edit, Write, Bash writes). ' +
-        'Include the change type ("modified", "created", or "deleted").\n' +
-      '• provenance.toolCalls — notable tool invocations (name + short input/output).\n' +
-      '• provenance.subAgents — names of any sub-agents you spawned.\n\n' +
-      'Also include outputs (what was produced) and estimated usage (inputTokens, outputTokens, totalTokens, costUsd) — best-effort token estimates, since no surface exposes exact counts to a tool; the panel labels them as estimates. ' +
-      'The response returns updated readyRowIds so you know which dependent tasks can now be dispatched.',
-    inputSchema: {
-      type: 'object',
-      required: ['workflowId', 'rowId'],
-      properties: {
-        workflowId: { type: 'string', description: 'The workflowId returned by gridflow_openWorkflow.' },
-        rowId: { type: 'string', description: 'The row id from the openWorkflow response.' },
-        status: { type: 'string', enum: ['pending', 'queued', 'running', 'blocked', 'done', 'failed', 'cancelled'], description: 'Send "running" when dispatching the sub-agent, then "done"/"failed" when it returns.' },
-        agent: { type: 'string', description: 'The sub-agent that ran this row (e.g. "Explore", "general-purpose").' },
-        model: { type: 'string', description: 'Model used (e.g. "claude-opus-4-8").' },
-        inputs: { type: 'string', description: 'The prompt/context handed to the sub-agent.' },
-        outputs: { type: 'string', description: 'What the sub-agent produced.' },
-        summary: { type: 'string', description: 'One-line outcome. Defaults to first 240 chars of outputs.' },
-        dependsOn: { type: 'array', items: { type: 'string' }, description: 'Row ids this row depends on (if changing dependencies).' },
-        startedAt: { type: 'string', description: 'ISO timestamp when the run started (optional; GridFlow tracks this automatically).' },
-        finishedAt: { type: 'string', description: 'ISO timestamp when the run finished. Defaults to now.' },
-        durationMs: { type: 'number', description: 'Wall-clock duration in ms (optional; GridFlow computes it from running→done).' },
-        provenance: {
-          type: 'object',
-          properties: {
-            prompt: { type: 'string' },
-            context: { type: 'string' },
-            filesRead: {
-              type: 'array',
-              description: 'Every file path read or searched during this task (Read tool calls, grep, find, cat, etc.). Include ALL of them — the user sees this count in the panel.',
-              items: { type: 'object', properties: { path: { type: 'string', description: 'Absolute or workspace-relative file path.' }, note: { type: 'string', description: 'Optional short note (e.g. "searched for auth logic").' } }, required: ['path'] },
-            },
-            filesModified: {
-              type: 'array',
-              description: 'Every file created, edited, or deleted during this task (Edit, Write, Bash writes/deletions).',
-              items: { type: 'object', properties: { path: { type: 'string', description: 'Absolute or workspace-relative file path.' }, change: { type: 'string', enum: ['modified', 'created', 'deleted'], description: 'How the file was changed.' }, note: { type: 'string', description: 'Optional short note (e.g. "added auth middleware").' } }, required: ['path'] },
-            },
-            toolCalls: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, input: { type: 'string' }, output: { type: 'string' } }, required: ['name'] } },
-            subAgents: { type: 'array', items: { type: 'string' } },
-          },
-        },
-        usage: {
-          type: 'object',
-          description: 'Estimated token usage for this run (best-effort — exact counts are not exposed to tools). The panel labels these as estimates.',
-          properties: {
-            inputTokens: { type: 'number' },
-            outputTokens: { type: 'number' },
-            totalTokens: { type: 'number' },
-            costUsd: { type: 'number' },
-          },
-        },
-        logs: {
-          type: 'array',
-          items: { type: 'object', properties: { message: { type: 'string' }, level: { type: 'string', enum: ['debug', 'info', 'warn', 'error'] }, at: { type: 'string' } }, required: ['message'] },
-        },
-      },
-    },
-  },
-  {
-    name: 'gridflow_getWorkflow',
-    description:
-      'Returns the current state of all rows in a workflow — status, assigned agent, inputs, outputs, cost, run count. ' +
-      'Use to read structured context from a running workflow or to resume one.',
-    inputSchema: {
-      type: 'object',
-      required: ['workflowId'],
-      properties: {
-        workflowId: { type: 'string', description: 'The workflowId returned by gridflow_openWorkflow.' },
-      },
-    },
-  },
-  {
-    name: 'gridflow_collectStructuredInput',
-    description:
-      'Opens an interactive grid in VS Code and blocks until the user fills it in and clicks "Send to Chat". ' +
-      'Returns the rows as JSON. For one-shot form-style collection. For multi-step agent work use gridflow_openWorkflow.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        title: { type: 'string' },
-        templateId: { type: 'string', description: "Built-in: 'subagent-orchestration', 'api-endpoints', 'test-cases'." },
-        columns: {
-          type: 'array',
-          items: {
-            type: 'object',
-            required: ['name', 'type'],
-            properties: {
-              name: { type: 'string' },
-              type: { type: 'string', enum: ['text', 'select', 'number', 'boolean'] },
-              options: { type: 'array', items: { type: 'string' } },
-              placeholder: { type: 'string' },
-            },
-          },
-        },
-        rows: { type: 'array', items: { type: 'object' } },
-        instructions: { type: 'string' },
-      },
-    },
-  },
-];

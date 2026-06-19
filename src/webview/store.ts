@@ -12,6 +12,7 @@ import {
   emptyWorkItem,
   makeId,
 } from '../shared/types';
+import { fanOutSubstitute } from '../shared/workflowCore';
 import { post } from './vscode';
 
 /**
@@ -25,6 +26,8 @@ export interface AppState {
   mode: GridMode;
   canSendToChat: boolean;
   pendingChatInvocation: boolean;
+  /** Pro build only: a tamper-evident audit chain is being recorded for this workflow. */
+  auditChain: boolean;
   snapshot: GridSnapshot;
   templates: TemplateDef[];
   focusedCell: { rowId: string; colId: string } | null;
@@ -46,6 +49,7 @@ let state: AppState = {
   mode: 'standalone',
   canSendToChat: false,
   pendingChatInvocation: false,
+  auditChain: false,
   snapshot: DEFAULT_SNAPSHOT,
   templates: [],
   focusedCell: null,
@@ -78,7 +82,7 @@ export const store = {
   },
 
   /* ---------- initialization ---------- */
-  init(snapshot: GridSnapshot, mode: GridMode, canSendToChat: boolean) {
+  init(snapshot: GridSnapshot, mode: GridMode, canSendToChat: boolean, auditChain = false) {
     set(
       () => ({
         ...state,
@@ -86,6 +90,7 @@ export const store = {
         snapshot,
         mode,
         canSendToChat,
+        auditChain,
         statusFilter: 'all',
       }),
       false,
@@ -170,12 +175,57 @@ export const store = {
   },
 
   deleteRows(rowIds: string[]) {
-    set((s) => ({
-      ...s,
-      snapshot: { ...s.snapshot, rows: s.snapshot.rows.filter((r) => !rowIds.includes(r.id)) },
-      selectedRowIds: s.selectedRowIds.filter((id) => !rowIds.includes(id)),
-      expandedRowId: s.expandedRowId && rowIds.includes(s.expandedRowId) ? null : s.expandedRowId,
-    }));
+    set((s) => {
+      const removed = new Set(rowIds);
+      // Prune dangling dependsOn references so surviving rows don't wait
+      // forever on a row that no longer exists.
+      const rows = s.snapshot.rows
+        .filter((r) => !removed.has(r.id))
+        .map((r) => {
+          const deps = r.work?.dependsOn;
+          if (!deps?.length || !deps.some((d) => removed.has(d))) return r;
+          const kept = deps.filter((d) => !removed.has(d));
+          return { ...r, work: { ...r.work!, dependsOn: kept.length ? kept : undefined } };
+        });
+      return {
+        ...s,
+        snapshot: { ...s.snapshot, rows },
+        selectedRowIds: s.selectedRowIds.filter((id) => !removed.has(id)),
+        expandedRowId: s.expandedRowId && removed.has(s.expandedRowId) ? null : s.expandedRowId,
+      };
+    });
+  },
+
+  /**
+   * Fan a template row out into one row per list item (the map primitive),
+   * substituting {{item}} in cell text and the inputs prompt. New rows inherit
+   * the template's agent/model/dependencies but start fresh (no history).
+   */
+  fanOutRow(templateRowId: string, items: string[]) {
+    set((s) => {
+      const idx = s.snapshot.rows.findIndex((r) => r.id === templateRowId);
+      if (idx < 0) return s;
+      const tmpl = s.snapshot.rows[idx];
+      const clean = items.map((i) => i.trim()).filter(Boolean);
+      if (!clean.length) return s;
+      const newRows: Row[] = clean.map((item) => {
+        const cells: RowData = {};
+        for (const [k, v] of Object.entries(tmpl.cells)) {
+          cells[k] = typeof v === 'string' ? fanOutSubstitute(v, item) : v;
+        }
+        const work: WorkItem = {
+          ...emptyWorkItem(),
+          assignedAgent: tmpl.work?.assignedAgent,
+          model: tmpl.work?.model,
+          inputs: tmpl.work?.inputs ? fanOutSubstitute(tmpl.work.inputs, item) : undefined,
+          dependsOn: tmpl.work?.dependsOn,
+        };
+        return { id: makeId('row'), cells, work };
+      });
+      const rows = [...s.snapshot.rows];
+      rows.splice(idx + 1, 0, ...newRows);
+      return { ...s, snapshot: { ...s.snapshot, rows } };
+    });
   },
 
   duplicateRow(rowId: string) {
@@ -329,6 +379,17 @@ export const store = {
 
   setInstructions(instructions: string) {
     set((s) => ({ ...s, snapshot: { ...s.snapshot, instructions } }));
+  },
+
+  /** Set or clear the workflow spend cap. Passing an empty object clears it. */
+  setBudget(budget: { maxTokens?: number; maxCostUsd?: number }) {
+    set((s) => {
+      const next = { ...budget };
+      if (next.maxTokens == null) delete next.maxTokens;
+      if (next.maxCostUsd == null) delete next.maxCostUsd;
+      const hasBudget = next.maxTokens != null || next.maxCostUsd != null;
+      return { ...s, snapshot: { ...s.snapshot, budget: hasBudget ? next : undefined } };
+    });
   },
 };
 

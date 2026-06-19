@@ -32,11 +32,23 @@ export interface Row {
 /** A grid is either plain tabular `data` or an AI `workflow` of work items. */
 export type GridKind = 'data' | 'workflow';
 
+/**
+ * Optional spend ceiling for a workflow. When the aggregate (estimated) tokens
+ * or cost exceed the cap, GridFlow stops surfacing rows for dispatch so a
+ * runaway orchestration can't burn the budget. Estimates are best-effort.
+ */
+export interface WorkflowBudget {
+  maxTokens?: number;
+  maxCostUsd?: number;
+}
+
 export interface GridSnapshot {
   title?: string;
   instructions?: string;
   /** Defaults to 'data' when omitted (back-compat with existing CSV/standalone grids). */
   kind?: GridKind;
+  /** Workflow-mode only: an optional spend ceiling that halts dispatch when exceeded. */
+  budget?: WorkflowBudget;
   columns: ColumnDef[];
   rows: Row[];
 }
@@ -71,12 +83,23 @@ export type FileRefKind = 'source' | 'terminal' | 'test' | 'log' | 'screenshot' 
 /** How a file was touched during a run (drives the provenance read/modified lists). */
 export type FileChange = 'read' | 'modified' | 'created' | 'deleted';
 
+/**
+ * GridFlow's own audit of an agent-reported file claim:
+ * - `verified` — GridFlow confirmed it (file exists; for modifications, mtime
+ *   falls inside the run window; for deletions, the file is gone).
+ * - `unverified` — the file exists but the claim couldn't be confirmed.
+ * - `missing` — the agent reported a path that doesn't exist.
+ */
+export type FileVerification = 'verified' | 'unverified' | 'missing';
+
 export interface FileRef {
   path: string;
   kind?: FileRefKind;
   change?: FileChange;
   /** Optional short note (e.g. "added auth middleware"). */
   note?: string;
+  /** Set by GridFlow's provenance verifier — never by the agent. */
+  verification?: FileVerification;
 }
 
 export interface ToolCallRecord {
@@ -120,6 +143,27 @@ export interface Provenance {
   subAgents?: string[];
 }
 
+/** A dependency's output, captured as input context for a downstream run. */
+export interface DependencyOutput {
+  rowId: string;
+  /** Human-readable title of the dependency row (its first text cell). */
+  title?: string;
+  /** The dependency's outputs at the moment this run started. */
+  outputs?: string;
+}
+
+/**
+ * The exact inputs a run was given, captured by the engine when the run opens.
+ * This is what makes deterministic single-node replay possible: a failed node
+ * can be re-dispatched with these inputs without re-running its upstream.
+ */
+export interface ResolvedInputs {
+  /** The row's own inputs/prompt at the time the run started. */
+  inputs?: string;
+  /** Snapshot of each dependency's outputs at the time the run started. */
+  dependencyOutputs?: DependencyOutput[];
+}
+
 /** One execution of a work item — the unit of replay and history. */
 export interface ExecutionRun {
   id: string;
@@ -137,6 +181,11 @@ export interface ExecutionRun {
   logs?: LogEntry[];
   /** One-line outcome summary. */
   summary?: string;
+  /**
+   * The inputs this run was dispatched with — captured by GridFlow at run-open,
+   * never reported by the agent. Enables replaying this exact node.
+   */
+  resolvedInputs?: ResolvedInputs;
 }
 
 /**
@@ -144,8 +193,13 @@ export interface ExecutionRun {
  * inputs) are edited in the UI; the rest are populated by whatever agent claims the
  * row and reports back through the cockpit protocol.
  */
+/** A row is either ordinary work or an evaluation step that checks other rows. */
+export type WorkItemRole = 'task' | 'verifier';
+
 export interface WorkItem {
   status: WorkItemStatus;
+  /** 'verifier' rows evaluate the workflow's outputs (drives pro auto-verification). Defaults to 'task'. */
+  role?: WorkItemRole;
   /** Agent/sub-agent assigned to do the work (e.g. "Explore", "claude-code"). */
   assignedAgent?: string;
   /** Preferred model for this work item. */
@@ -184,21 +238,6 @@ export interface TemplateDef {
   seedRows?: RowData[];
 }
 
-/**
- * Hash-reference shortcuts inserted from the `#` autocomplete in a cell.
- * Stored inline in the cell value as text tokens like `#file:src/foo.ts`,
- * `#codebase`, `#errors`, `#selection`. The extension is responsible for
- * resolving these when serializing the grid to chat.
- */
-export interface HashCompletionItem {
-  kind: 'file' | 'codebase' | 'errors' | 'selection' | 'symbol';
-  label: string;
-  /** Token written into the cell, e.g. "#file:src/foo.ts". */
-  token: string;
-  /** Optional secondary text (e.g. relative path). */
-  detail?: string;
-}
-
 /* ------------------------------------------------------------------ */
 /* Message protocol: webview ↔ extension                              */
 /* ------------------------------------------------------------------ */
@@ -219,18 +258,17 @@ export type WebviewToHost =
   | { type: 'importCsvFile' }
   | { type: 'importCsvText'; text: string }
   | { type: 'exportCsv'; snapshot: GridSnapshot }
-  | { type: 'requestHashCompletions'; query: string }
+  | { type: 'exportWorkflowReport'; snapshot: GridSnapshot }
   | { type: 'openFilePicker' }
   | { type: 'sendToChat'; snapshot: GridSnapshot }
   | { type: 'showError'; message: string }
   | { type: 'showInfo'; message: string };
 
 export type HostToWebview =
-  | { type: 'init'; snapshot: GridSnapshot; mode: GridMode; canSendToChat: boolean }
+  | { type: 'init'; snapshot: GridSnapshot; mode: GridMode; canSendToChat: boolean; auditChain?: boolean }
   | { type: 'setSnapshot'; snapshot: GridSnapshot }
   | { type: 'templates'; templates: TemplateDef[] }
   | { type: 'csvParsed'; columns: ColumnDef[]; rows: Row[] }
-  | { type: 'hashCompletions'; query: string; items: HashCompletionItem[] }
   | { type: 'filePickerResult'; token: string | null }
   | { type: 'pendingChatInvocation'; pending: boolean }
   | { type: 'themeChanged' };

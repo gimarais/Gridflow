@@ -5,7 +5,9 @@ import { defineConfig } from '@vscode/test-cli';
 // `test-workspace/` is opened as the folder, giving workflowStore a place to write the
 // `.gridflow/*.json` sidecars that the orchestrator/persistence tests exercise.
 export default defineConfig({
-  files: 'out/test/**/*.test.js',
+  // tsconfig.test.json rootDir is the repo root, so compiled test output lands
+  // under out/src/test/.
+  files: 'out/**/*.test.js',
   workspaceFolder: './test-workspace',
   mocha: {
     ui: 'bdd',

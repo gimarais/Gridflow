@@ -2,6 +2,71 @@
 
 All notable changes to GridFlow are documented here.
 
+## [0.3.0] — 2026-06-16
+
+Implements the DAG-orchestration frontier from a research survey that cites GridFlow as a premier example. Fully open source (MIT) — every feature is built in and always on.
+
+### Added
+- **Single-node replay + edge-state propagation.** Each run now captures its `resolvedInputs` (the row's own prompt plus a snapshot of every dependency's outputs). New `gridflow_replayRow` tool resets one finished/failed row to `pending` and returns those exact inputs, so a failed node re-runs **without** re-running upstream. Tool responses now include `readyRows` (each ready row with its dependency outputs) so orchestrators wire parent results deterministically. The drawer shows captured inputs and a dependency-output preview.
+- **Workflow budget cap.** Set a `maxCostUsd` / `maxTokens` ceiling; dispatch halts (`budgetExceeded`) when spent. Summary-bar meter + inline editor.
+- **Fan-out / map.** `gridflow_fanOut` (and a "Fan out over a list…" row action) expand one template row into N parallel rows with `{{item}}` / `{{field}}` substitution.
+- **Pre-action file-risk gate.** Warns (in the drawer and in `riskyRows`) when a row is about to touch a file a prior failed run stumbled on.
+- **Critical-path highlight.** Longest weighted dependency chain marked in the grid and surfaced in the summary bar + tool payload (`criticalPath`).
+- **CLI `gridflow lint` + `gridflow plan`.** Validate workflows as a CI gate (non-zero exit on dependency cycles) and print the topological parallelism waves.
+
+### Added — advanced modules (built in, always on)
+Four advanced capabilities live in self-contained folders under `src/extension/` (`compliance/`, `verify/`, `advisor/`, `governance/`), each a pure `vscode`-free core plus VS Code / MCP wiring. The three MCP tools are aggregated in `src/extension/featureTools.ts`.
+- **Compliance pack (audit-grade provenance).** IETF Agent Audit Trail: every update appends a SHA-256 **hash-chained, tamper-evident** record to `.gridflow/<slug>.aat.jsonl`; commands **GridFlow: Verify Audit Chain** and **GridFlow: Export Compliance Attestation** (session_hash); a 🔒 audit-chain indicator in the summary bar. Built for the EU AI Act (effective Aug 2026).
+- **Verifier + adaptive replanning.** `verifier` row role; `gridflow_verifyWorkflow` scores completeness against verifier rows, recommends stop/continue (VMAO stop conditions), and can append a gap-filling sub-DAG.
+- **Model advisor.** `gridflow_suggestModel` recommends a model per row from the workflow's own run history (success rate, then cost, then duration).
+- **Governance.** `gridflow_projectMemory` aggregates file-failure history across **all** workflows in the repo, flagging repo-wide risk before dispatch.
+
+### Internal
+- Pure protocol logic extended in `src/shared/workflowCore.ts` (`resolveRowInputs`, `prepareReplay`, `budgetStatus`/`dispatchPlan`, `buildFanOut`, `fileRiskWarnings`/`riskyRows`, `criticalPath`, `validateWorkflow`/`executionWaves`).
+- New test suites under `src/test/shared` and `src/test/extension`: replay, budget, fan-out, file-risk, critical-path, validation/waves, plus the AAT hash chain (tamper/reorder/removal detection, session hash), verifier/VMAO, advisor scoring, governance aggregation, and feature-tool integration through real persistence. 143 tests passing.
+
+## [0.2.0] — 2026-06-11
+
+### Added — audit accuracy ("verify, don't trust")
+- **Provenance verification.** Every file an agent reports via `updateRow` is now cross-checked against the real filesystem: reads for existence, modifications for an mtime inside the run window (±5s), deletions for absence. Claims are badged **✓ verified / ? unverified / ✗ missing** in the detail drawer and markdown reports; the `updateRow` response returns a `verification` summary so the orchestrator can self-correct. Paths are normalized (absolute → workspace-relative) and deduped.
+- **Cost estimation.** When an agent reports tokens without `costUsd`, GridFlow estimates cost from a built-in $/MTok table (prefix-matched per model; override via the new `gridflow.modelPricing` setting). Estimates are always labeled.
+
+### Added — new surfaces
+- **`gridflow` CLI** (`cli/`, zero dependencies): `gridflow watch` (live terminal dashboard), `gridflow report <workflow>` (markdown audit report), and `gridflow serve` (**headless GridFlow** — the same MCP tools, HTTP API, and dashboard without VS Code; `openWorkflow` returns immediately since there's no panel to confirm).
+- **Web dashboard** at `GET /dashboard` (new command **GridFlow: Open Web Dashboard**) — a self-contained, live, read-only browser view of all workflows; usable by any browser-based platform.
+- **HTTP API**: `GET /api/workflows` and `GET /api/workflows/<slug>` (token-gated) expose workflow state as JSON for external integrations.
+- **Streamable HTTP MCP transport** (`POST /mcp`, spec 2025-03-26) so modern MCP clients (Claude Code, Gemini CLI, Codex, Cline, Continue, …) connect directly without the stdio proxy. The legacy SSE transport and proxy remain for Claude desktop. **Show MCP Configuration** now includes ready-made snippets, and the capability token persists across window reloads.
+
+### Added — cockpit UX
+- **Workflow summary bar**: progress, running/failed counts, and estimated tokens/cost/duration; running rows show **live elapsed time**.
+- **Editable status and dependencies** in the detail drawer (dependency picker is cycle-safe), plus a one-click **Re-queue** for finished/failed rows (history preserved — the next orchestration pass picks them up via `readyRowIds`).
+- **Markdown audit report** export (toolbar + `GridFlow: Export Workflow Audit Report…` + completion-notification action) — summary table and per-row provenance with verification badges, PR-description-ready.
+- **GridFlow Workflows tree view** in the Explorer with live status counts, and a **completion notification** when a workflow's last row reaches a terminal status.
+
+### Fixed — correctness under parallel orchestration
+- **Lost-update race eliminated.** All sidecar load-modify-write cycles (parallel `updateRow`/`addRows` calls and the panel's debounced save) are serialized through a per-workflow lock, and orchestrator writes invalidate pending stale panel saves. Previously, concurrent updates could silently drop runs.
+- **Dependency cycles are rejected** (with the dropped edges reported to the agent) instead of silently deadlocking `readyRowIds`; hand-edited cycles are reported as `deadlockedRowIds`.
+- **Stale running rows** (no update for 30+ minutes) are reported as `staleRowIds` so orchestrators can recover from dead agents.
+- Deleting a row now prunes other rows' `dependsOn` references; dangling references no longer block readiness.
+- `updateRow` validates `status` against the enum and reports invalid values clearly.
+
+### Security
+- Workflow sidecars and workspace template files are **sanitized on load** (type/enum validation, size caps) — a malformed or hostile `.gridflow/*.json` in a cloned repo can no longer crash the panel.
+- Agent payloads (provenance, logs, outputs) are size-capped before persisting, preventing unbounded sidecar growth.
+- **CSV exports neutralize formula injection** (`=`, `+`, `-`, `@` at the start of string cells; `gridflow.csvSafeExport`, default on).
+- Webview CSP hardened: crypto-random nonce (was `Math.random`), nonce'd `style-src` (dropped blanket `unsafe-inline`); SSE session ids are crypto-random; concurrent SSE clients capped; `~/.gridflow` permissions re-tightened on every activation.
+- Writing the Claude Code agent definition to `~/.claude/agents/` now requires **one-time user consent**.
+
+### Performance
+- Detail-drawer text fields commit on blur instead of posting the full snapshot per keystroke.
+- Grid rows are memoized and offscreen rows are culled via `content-visibility`, keeping large grids responsive.
+- File-picker searches are cached (2s) and exclude `dist`/`out`/`.git`.
+- Removed the dead `HashAutocomplete` component and its unused message path.
+
+### Internal
+- Pure workflow logic extracted to `src/shared/workflowCore.ts` (plus `sanitize`, `mutex`, `modelPricing`, `provenanceCore`, `mcpSchemas`, `orchestratorPrompt`, `dashboardHtml`) — shared verbatim by the extension, the webview, and the CLI; the future open-core seam.
+- New test suites: cycle detection, concurrent-update locking, sanitization, provenance verification (pure + real-filesystem), CSV-injection guard, markdown reports (80 tests total).
+
 ## [0.1.0] — 2026-06-09
 
 ### Changed

@@ -43,7 +43,7 @@ try {
 onHostMessage((msg) => {
   switch (msg.type) {
     case 'init':
-      store.init(msg.snapshot, msg.mode, msg.canSendToChat);
+      store.init(msg.snapshot, msg.mode, msg.canSendToChat, msg.auditChain);
       // Eagerly fetch templates so the Templates menu is responsive.
       post({ type: 'requestTemplates' });
       return;
@@ -58,9 +58,6 @@ onHostMessage((msg) => {
       return;
     case 'pendingChatInvocation':
       store.setPendingChat(msg.pending);
-      return;
-    case 'hashCompletions':
-      window.dispatchEvent(new CustomEvent('gridflow:hash-completions', { detail: msg }));
       return;
     case 'filePickerResult':
       window.dispatchEvent(new CustomEvent('gridflow:file-picker-result', { detail: msg }));

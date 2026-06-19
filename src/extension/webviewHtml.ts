@@ -1,12 +1,11 @@
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as nodePath from 'path';
 
 export function makeNonce(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let out = '';
-  for (let i = 0; i < 32; i++) out += chars.charAt(Math.floor(Math.random() * chars.length));
-  return out;
+  // CSP nonce must be unpredictable — crypto-grade, not Math.random().
+  return crypto.randomBytes(16).toString('base64url');
 }
 
 export function renderWebviewHtml(
@@ -34,7 +33,11 @@ export function renderWebviewHtml(
 
   const csp = [
     `default-src 'none'`,
-    `style-src 'unsafe-inline'`,
+    // <style> elements need the nonce (blocks injected stylesheets); style
+    // *attributes* (React style props, the error fallback) stay allowed via
+    // the granular -attr directive — attributes can't load external resources.
+    `style-src 'nonce-${nonce}'`,
+    `style-src-attr 'unsafe-inline'`,
     `script-src 'nonce-${nonce}' ${webview.cspSource}`,
     `img-src ${webview.cspSource} data:`,
     `font-src ${webview.cspSource}`,

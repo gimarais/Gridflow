@@ -2,13 +2,16 @@
   "name": "gridflow",
   "displayName": "GridFlow",
   "description": "An interactive grid for structured data — orchestrate sub-agents, collect typed chat input, and view/edit CSV files inside VS Code.",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "publisher": "OkayExtensions",
   "license": "MIT",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/gimarais/Gridflow"
+  },
+  "sponsor": {
+    "url": "https://github.com/sponsors/gimarais"
   },
   "engines": {
     "vscode": "^1.95.0"
@@ -97,6 +100,47 @@
         "title": "Open as GridFlow Workflow",
         "category": "GridFlow",
         "icon": "$(list-tree)"
+      },
+      {
+        "command": "gridflow.exportWorkflowReport",
+        "title": "GridFlow: Export Workflow Audit Report…",
+        "category": "GridFlow",
+        "icon": "$(book)"
+      },
+      {
+        "command": "gridflow.openWebDashboard",
+        "title": "GridFlow: Open Web Dashboard",
+        "category": "GridFlow",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "gridflow.verifyChain",
+        "title": "GridFlow: Verify Audit Chain",
+        "category": "GridFlow",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "gridflow.exportAttestation",
+        "title": "GridFlow: Export Compliance Attestation…",
+        "category": "GridFlow",
+        "icon": "$(verified)"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "gridflowWorkflows",
+          "name": "GridFlow Workflows",
+          "icon": "$(list-tree)",
+          "visibility": "collapsed",
+          "contextualTitle": "GridFlow Workflows"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "gridflowWorkflows",
+        "contents": "No workflows yet.\n[Open AI Workflow…](command:gridflow.openWorkflow)"
       }
     ],
     "menus": {
@@ -298,6 +342,58 @@
         }
       },
       {
+        "name": "gridflow_fanOut",
+        "displayName": "Fan Out Workflow Tasks (GridFlow)",
+        "modelDescription": "Expands ONE template row into N parallel rows — the map/fan-out primitive. Use when the same task runs over a list (e.g. 'audit each of these files'). In the template's string fields use {{item}} (whole item) or {{field}} (object field). Set the template's dependsOn to existing parent row ids to gate the whole fan-out. Each item becomes an independent row that can run in parallel.",
+        "userDescription": "Lets the AI create one task per item in a list.",
+        "canBeReferencedInPrompt": false,
+        "icon": "$(list-flat)",
+        "tags": [
+          "grid",
+          "workflow",
+          "gridflow"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "workflowId",
+            "template",
+            "items"
+          ],
+          "properties": {
+            "workflowId": {
+              "type": "string",
+              "description": "The workflowId returned by gridflow_openWorkflow."
+            },
+            "template": {
+              "type": "object",
+              "description": "A single sub-agent task row with {{item}}/{{field}} placeholders. Reserved keys: agent, model, inputs, dependsOn (existing row ids). Other keys are cell values keyed by column name.",
+              "properties": {
+                "agent": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "inputs": {
+                  "type": "string"
+                },
+                "dependsOn": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "items": {
+              "type": "array",
+              "description": "The list to fan out over. Strings (use {{item}}) or objects (use {{field}})."
+            }
+          }
+        }
+      },
+      {
         "name": "gridflow_updateRow",
         "displayName": "Update Workflow Row (GridFlow)",
         "modelDescription": "Reports a sub-agent's progress on a workflow row. Call TWICE per row: (1) status:'running' when dispatch begins, (2) status:'done'/'failed' on completion. On completion: populate provenance.filesRead (every file the sub-agent accessed — extract from the <gf-prov> tag in its output if you included the provenance instruction), provenance.filesModified, provenance.toolCalls, outputs (strip the <gf-prov> line first), and estimated usage (best-effort token estimates) if derivable. Leaving provenance empty shows '0 files read' to the user. Keep chat output to one sentence — results go in outputs for the panel.",
@@ -369,10 +465,6 @@
             },
             "finishedAt": {
               "type": "string"
-            },
-            "durationMs": {
-              "type": "number",
-              "description": "Optional; GridFlow computes it from running→done."
             },
             "provenance": {
               "type": "object",
@@ -525,6 +617,40 @@
         }
       },
       {
+        "name": "gridflow_replayRow",
+        "displayName": "Replay Workflow Row (GridFlow)",
+        "modelDescription": "Replays a SINGLE finished/failed row without re-running any upstream work. Resets just that row to 'pending' (history preserved) and returns its resolvedInputs — the row's own prompt plus a snapshot of every dependency's outputs. Use to recover from a failed node: call gridflow_replayRow, re-dispatch the sub-agent with the returned resolvedInputs (optionally pass promptOverride), then report the new run via gridflow_updateRow.",
+        "userDescription": "Lets the AI re-run one failed workflow step without redoing the whole workflow.",
+        "canBeReferencedInPrompt": false,
+        "icon": "$(debug-restart)",
+        "tags": [
+          "grid",
+          "workflow",
+          "gridflow"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "workflowId",
+            "rowId"
+          ],
+          "properties": {
+            "workflowId": {
+              "type": "string",
+              "description": "The workflowId returned by gridflow_openWorkflow."
+            },
+            "rowId": {
+              "type": "string",
+              "description": "The id of the row to replay."
+            },
+            "promptOverride": {
+              "type": "string",
+              "description": "Optional: replace the row's inputs/prompt for the replay."
+            }
+          }
+        }
+      },
+      {
         "name": "gridflow_collectStructuredInput",
         "displayName": "Collect Structured Input (GridFlow)",
         "modelDescription": "Opens an interactive grid in the editor so the user can fill in structured input — rows of typed cells (text, select, number, boolean). Use when the user needs to provide multiple related pieces of structured data (e.g. a list of sub-agent tasks to orchestrate, API endpoints to design, test cases to enumerate). The tool blocks until the user clicks 'Send to Chat' and then returns the grid as a JSON array of objects. Prefer this over asking the user to paste a table inline. You may pass a template (one of the registered template ids), an initial set of columns, and/or initial rows to pre-populate.",
@@ -624,7 +750,28 @@
         "gridflow.mcpPort": {
           "type": "number",
           "default": 54321,
-          "description": "Port for the local MCP server that exposes GridFlow to Claude Code and other MCP clients. Set to 0 to disable the MCP server."
+          "description": "Port for the local MCP server that exposes GridFlow to Claude Code and other MCP clients (also serves the HTTP API and web dashboard). Set to 0 to disable."
+        },
+        "gridflow.csvSafeExport": {
+          "type": "boolean",
+          "default": true,
+          "description": "Escape cells starting with =, +, -, or @ when exporting CSV so they can't execute as formulas in Excel/Sheets (OWASP CSV-injection mitigation)."
+        },
+        "gridflow.modelPricing": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Override or extend the built-in model pricing table used to estimate run cost from reported tokens. Keys are model-id prefixes, values are `{\"inputPerMTok\": number, \"outputPerMTok\": number}` in USD.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "inputPerMTok": {
+                "type": "number"
+              },
+              "outputPerMTok": {
+                "type": "number"
+              }
+            }
+          }
         }
       }
     }
@@ -634,7 +781,7 @@
     "build": "node esbuild.mjs --production",
     "build:dev": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.webview.json && tsc --noEmit -p tsconfig.test.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.webview.json && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p mcp/tsconfig.json && tsc --noEmit -p cli/tsconfig.json",
     "compile-tests": "tsc -p tsconfig.test.json",
     "watch-tests": "tsc -p tsconfig.test.json -w",
     "pretest": "npm run compile-tests",

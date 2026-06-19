@@ -1,5 +1,6 @@
 import * as assert from 'node:assert/strict';
-import { GridSnapshot } from '../../shared/types';
+import * as vscode from 'vscode';
+import { GridSnapshot, Row } from '../../shared/types';
 import { WorkflowOrchestrator, workflowToText } from '../../extension/workflowOrchestrator';
 import { loadWorkflow, saveWorkflow } from '../../extension/workflowStore';
 import { clearWorkflowDir, requireWorkspace } from '../helpers';
@@ -82,6 +83,106 @@ describe('WorkflowOrchestrator', () => {
       await assert.rejects(() => orch.updateRow({ workflowId: 'missing', rowId: 'r1', status: 'done' }), /not found/);
       await assert.rejects(() => orch.updateRow({ workflowId: 'present', rowId: 'nope', status: 'done' }), /not found/);
     });
+
+    it('rejects an invalid status with a helpful message', async () => {
+      await seed('badstatus', [{ id: 'r1', cells: { c_task: 'a' }, work: { status: 'pending' } }]);
+      await assert.rejects(
+        () => orch.updateRow({ workflowId: 'badstatus', rowId: 'r1', status: 'exploded' as never }),
+        /Invalid status/,
+      );
+    });
+  });
+
+  describe('updateRow — parallel calls (the flagship orchestration path)', () => {
+    it('persists every run when many rows are updated concurrently', async () => {
+      const rows: Row[] = Array.from({ length: 10 }, (_, i) => ({
+        id: `r${i}`,
+        cells: { c_task: `task ${i}` },
+        work: { status: 'pending' as const },
+      }));
+      await seed('parallel', rows);
+
+      // Fire 10 unsynchronized updateRow calls — each is a full load-modify-write
+      // of the same sidecar; without the per-slug lock most writes would be lost.
+      await Promise.all(
+        rows.map((r, i) =>
+          orch.updateRow({
+            workflowId: 'parallel', rowId: r.id, status: 'done',
+            startedAt: T0, finishedAt: T1,
+            usage: { costUsd: 0.01 * (i + 1), totalTokens: 10 },
+          }),
+        ),
+      );
+
+      const loaded = await loadWorkflow('parallel');
+      for (const r of loaded!.rows) {
+        assert.equal(r.work?.status, 'done', `${r.id} should be done`);
+        assert.equal(r.work?.history?.length, 1, `${r.id} should have its run persisted`);
+      }
+      const totalCost = loaded!.rows.reduce((n, r) => n + (r.work?.usage?.costUsd ?? 0), 0);
+      assert.ok(Math.abs(totalCost - 0.55) < 1e-9, `no run lost: total cost ${totalCost} should be 0.55`);
+    });
+  });
+
+  describe('updateRow — provenance verification', () => {
+    it('labels reported files verified/missing against the real filesystem', async () => {
+      await seed('verify', [{ id: 'r1', cells: { c_task: 'a' }, work: { status: 'pending' } }]);
+
+      // Write a real file inside the test workspace during the run window.
+      const folder = vscode.workspace.workspaceFolders![0];
+      const fileUri = vscode.Uri.joinPath(folder.uri, 'verify-me.txt');
+      await vscode.workspace.fs.writeFile(fileUri, new TextEncoder().encode('evidence'));
+      try {
+        const now = Date.now();
+        const res = JSON.parse(
+          await orch.updateRow({
+            workflowId: 'verify', rowId: 'r1', status: 'done',
+            startedAt: new Date(now - 10_000).toISOString(),
+            finishedAt: new Date(now).toISOString(),
+            provenance: {
+              filesModified: [{ path: 'verify-me.txt', change: 'created' }],
+              filesRead: [{ path: 'this/file/does/not/exist.ts' }],
+            },
+          }),
+        );
+        assert.deepEqual(res.verification.filesModified, { total: 1, verified: 1, unverified: 0, missing: 0 });
+        assert.deepEqual(res.verification.filesRead, { total: 1, verified: 0, missing: 1 });
+
+        const loaded = await loadWorkflow('verify');
+        const prov = loaded?.rows[0].work?.history?.[0].provenance;
+        assert.equal(prov?.filesModified?.[0].verification, 'verified');
+        assert.equal(prov?.filesRead?.[0].verification, 'missing');
+      } finally {
+        await vscode.workspace.fs.delete(fileUri);
+      }
+    });
+  });
+
+  describe('replayRow — single-node replay', () => {
+    it('resets one finished row to pending, preserves history, returns resolved inputs', async () => {
+      await seed('replay', [
+        { id: 'a', cells: { c_task: 'research' }, work: { status: 'done', outputs: 'the findings' } },
+        { id: 'b', cells: { c_task: 'build' }, work: { status: 'failed', inputs: 'use findings', dependsOn: ['a'], history: [{ id: 'run_x', status: 'failed' }] } },
+      ]);
+
+      const res = JSON.parse(await orch.replayRow({ workflowId: 'replay', rowId: 'b' }));
+      assert.equal(res.status, 'pending');
+      assert.equal(res.resolvedInputs.dependencyOutputs[0].outputs, 'the findings');
+      assert.deepEqual(res.readyRowIds, ['b'], 'b is ready again (its dep is still done)');
+
+      const loaded = await loadWorkflow('replay');
+      const b = loaded!.rows.find((r) => r.id === 'b')!;
+      assert.equal(b.work?.status, 'pending');
+      assert.equal(b.work?.history?.length, 1, 'prior run preserved');
+      assert.equal(loaded!.rows.find((r) => r.id === 'a')?.work?.status, 'done', 'upstream untouched');
+    });
+
+    it('applies a promptOverride', async () => {
+      await seed('replay2', [{ id: 'r1', cells: { c_task: 'x' }, work: { status: 'failed', inputs: 'old' } }]);
+      const res = JSON.parse(await orch.replayRow({ workflowId: 'replay2', rowId: 'r1', promptOverride: 'new prompt' }));
+      assert.equal(res.resolvedInputs.inputs, 'new prompt');
+      assert.equal((await loadWorkflow('replay2'))!.rows[0].work?.inputs, 'new prompt');
+    });
   });
 
   describe('readyRowIds — the dependency DAG', () => {
@@ -128,6 +229,27 @@ describe('WorkflowOrchestrator', () => {
       assert.equal(a.work?.assignedAgent, 'Explore');
       // dependsOn:[0] referenced the first row of THIS batch -> a's id.
       assert.deepEqual(b.work?.dependsOn, [a.id]);
+    });
+
+    it('drops cycle-creating dependencies and reports them in the response', async () => {
+      await seed('addcycle', [{ id: 'r1', cells: { c_task: 'existing' }, work: { status: 'done' } }]);
+
+      const res = JSON.parse(
+        await orch.addRows({
+          workflowId: 'addcycle',
+          rows: [
+            { Task: 'a', dependsOn: [1] }, // forward edge a → b
+            { Task: 'b', dependsOn: [0] }, // would close the cycle — dropped
+          ],
+        }),
+      );
+      assert.equal(res.droppedDependencies.length, 1);
+      assert.match(res.droppedDependencies[0], /cycle/);
+
+      const loaded = await loadWorkflow('addcycle');
+      const [a, b] = loaded!.rows.slice(1);
+      assert.deepEqual(a.work?.dependsOn, [b.id]);
+      assert.equal(b.work?.dependsOn, undefined);
     });
   });
 
