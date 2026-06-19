@@ -10,6 +10,14 @@
       "preLaunchTask": "npm: build:dev"
     },
     {
+      "name": "Run Extension (dev, no workspace)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}", "--new-window"],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "npm: build:dev"
+    },
+    {
       "name": "Run Extension (production build)",
       "type": "extensionHost",
       "request": "launch",

@@ -87,13 +87,33 @@ export function parseCsv(text: string, delimiter: string): ParsedCsv {
   return { columns, rows };
 }
 
-export function serializeCsv(columns: ColumnDef[], rows: Row[], delimiter: string): string {
+/**
+ * CSV/formula injection guard (OWASP): a cell beginning with =, +, -, @, tab,
+ * or CR executes as a formula when the exported file is opened in Excel /
+ * Sheets. Workflow cells can contain agent-produced text, so exports escape
+ * these by prefixing a single quote. Only string cells are escaped — numeric
+ * and boolean cells can't carry a formula. Opt out via `safe: false`
+ * (the round-trip CSV editor keeps cells verbatim; only exports escape).
+ */
+const FORMULA_TRIGGER = /^[=+\-@\t\r]/;
+
+function escapeFormula(value: string): string {
+  return FORMULA_TRIGGER.test(value) ? `'${value}` : value;
+}
+
+export function serializeCsv(
+  columns: ColumnDef[],
+  rows: Row[],
+  delimiter: string,
+  opts: { safe?: boolean } = {},
+): string {
   const headers = columns.map((c) => c.name);
   const data = rows.map((r) =>
     columns.map((c) => {
       const v = r.cells[c.id];
       if (v === null || v === undefined) return '';
       if (typeof v === 'boolean') return v ? 'true' : 'false';
+      if (typeof v === 'string' && opts.safe) return escapeFormula(v);
       return String(v);
     }),
   );

@@ -1158,3 +1158,171 @@ tr.row-expanded > td {
   color: var(--gridflow-muted);
   font-variant-numeric: tabular-nums;
 }
+
+/* ── Large-grid rendering: skip layout/paint for offscreen rows ───────── */
+/* Chromium-only optimization (the webview is Chromium): rows outside the   */
+/* viewport are culled; the intrinsic size keeps the scrollbar stable.      */
+.grid tbody tr {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 33px;
+}
+
+/* ── Workflow summary bar (cockpit header) ────────────────────────────── */
+.workflow-summary-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--gridflow-border);
+  background: var(--vscode-editorWidget-background, transparent);
+  flex-shrink: 0;
+}
+.workflow-summary-bar .spacer { flex: 1; }
+.ws-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 160px;
+}
+.ws-progress-track {
+  width: 110px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--gridflow-button-secondary-bg);
+  overflow: hidden;
+}
+.ws-progress-fill {
+  height: 100%;
+  background: var(--vscode-charts-green, #89d185);
+  transition: width 0.25s ease;
+}
+.ws-progress-label { color: var(--gridflow-muted); white-space: nowrap; }
+.ws-chip {
+  padding: 0 7px;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+.ws-running {
+  background: rgba(204, 167, 0, 0.2);
+  color: var(--vscode-charts-yellow, #cca700);
+}
+.ws-failed {
+  background: rgba(244, 135, 113, 0.2);
+  color: var(--vscode-errorForeground, #f48771);
+}
+.ws-metric { color: var(--gridflow-muted); white-space: nowrap; }
+
+/* ── Provenance verification badges ───────────────────────────────────── */
+.tag-verification {
+  min-width: 14px;
+  text-align: center;
+  font-weight: 700;
+  text-transform: none;
+}
+.tag-verified {
+  background: rgba(137, 209, 133, 0.22);
+  color: var(--vscode-charts-green, #89d185);
+}
+.tag-unverified {
+  background: rgba(209, 134, 22, 0.22);
+  color: var(--vscode-charts-orange, #d18616);
+}
+.tag-missing {
+  background: rgba(244, 135, 113, 0.25);
+  color: var(--vscode-errorForeground, #f48771);
+}
+
+/* ── Detail drawer: status select, re-queue, dependency editor ────────── */
+.field.narrow { flex: 0 0 130px; }
+.requeue-btn { white-space: nowrap; }
+.dep-link { cursor: pointer; }
+.dep-link:hover { text-decoration: underline; }
+.dep-item .btn.icon { margin-left: auto; }
+.dep-add {
+  margin-top: 6px;
+  max-width: 320px;
+}
+
+/* ── Edge-state propagation: a dependency's output preview in the drawer ── */
+.dep-output {
+  flex-basis: 100%;
+  margin: 2px 0 0 22px;
+  padding: 3px 7px;
+  font-size: 11px;
+  color: var(--gridflow-muted);
+  background: var(--gridflow-button-secondary-bg);
+  border-radius: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Workflow budget meter (summary bar) ──────────────────────────────── */
+.ws-budget-chip, .ws-budget-add {
+  font-size: 11px;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+.ws-budget-add { color: var(--gridflow-muted); }
+.ws-budget-exceeded {
+  background: rgba(244, 135, 113, 0.2);
+  color: var(--vscode-errorForeground, #f48771);
+}
+.ws-budget-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ws-budget-edit .ws-budget-label { font-size: 11px; color: var(--gridflow-muted); }
+.ws-budget-edit .input { width: 84px; }
+
+/* ── Pre-action file-risk banner (drawer) ─────────────────────────────── */
+.risk-banner {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: rgba(209, 134, 22, 0.16);
+  border: 1px solid var(--vscode-charts-orange, #d18616);
+  color: var(--vscode-editor-foreground);
+}
+.risk-banner .risk-icon { color: var(--vscode-charts-orange, #d18616); }
+.risk-banner .risk-line { line-height: 1.5; }
+
+/* ── Critical-path highlight ──────────────────────────────────────────── */
+.grid tbody tr.row-critical .row-handle {
+  box-shadow: inset 2px 0 0 var(--vscode-charts-purple, #b180d7);
+}
+.critical-marker {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--vscode-charts-purple, #b180d7);
+}
+
+/* ── Pro: audit-chain indicator (summary bar) ─────────────────────────── */
+.ws-audit {
+  background: rgba(137, 209, 133, 0.18);
+  color: var(--vscode-charts-green, #89d185);
+  white-space: nowrap;
+}
+
+/* ── Verifier row badge ───────────────────────────────────────────────── */
+.verifier-badge {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 3px;
+  margin-right: 4px;
+  background: rgba(55, 148, 255, 0.18);
+  color: var(--vscode-charts-blue, #3794ff);
+  white-space: nowrap;
+}

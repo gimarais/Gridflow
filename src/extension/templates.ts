@@ -117,7 +117,16 @@ export class TemplateService {
     try {
       const buf = await vscode.workspace.fs.readFile(uri);
       const parsed = JSON.parse(new TextDecoder().decode(buf));
-      return Array.isArray(parsed) ? parsed : [];
+      if (!Array.isArray(parsed)) return [];
+      // The workspace template file ships with the repo — validate its shape so
+      // a malformed or hostile file can't crash template listing or the grid.
+      return parsed.filter(
+        (t): t is StoredTemplate =>
+          !!t && typeof t === 'object' &&
+          typeof (t as StoredTemplate).id === 'string' &&
+          typeof (t as StoredTemplate).name === 'string' &&
+          Array.isArray((t as StoredTemplate).columns),
+      );
     } catch {
       return [];
     }

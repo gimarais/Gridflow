@@ -2,8 +2,8 @@ import * as vscode from 'vscode';
 import { GridMode, GridSnapshot, HostToWebview, WebviewToHost, makeId } from '../shared/types';
 import { TemplateService } from './templates';
 import { detectDelimiter, parseCsv, serializeCsv } from './csv';
-import { resolveHashCompletions } from './hashCompletions';
 import { renderWebviewHtml } from './webviewHtml';
+import { slugify, workflowToMarkdown } from '../shared/workflowCore';
 
 export interface GridPanelOptions {
   title: string;
@@ -15,6 +15,8 @@ export interface GridPanelOptions {
   onSnapshotChanged?: (snapshot: GridSnapshot) => Thenable<void> | void;
   /** Used for standalone mode; ignored when an existing panel is passed in. */
   viewColumn?: vscode.ViewColumn;
+  /** True when the pro compliance module is recording a tamper-evident audit chain. */
+  auditChain?: boolean;
 }
 
 export class GridPanel {
@@ -24,6 +26,7 @@ export class GridPanel {
   private readonly mode: GridMode;
   private readonly onSendToChat?: GridPanelOptions['onSendToChat'];
   private readonly onSnapshotChanged?: GridPanelOptions['onSnapshotChanged'];
+  private readonly auditChain: boolean;
   private readonly ownsPanel: boolean;
   private isReady = false;
 
@@ -82,6 +85,7 @@ export class GridPanel {
     this.mode = options.mode;
     this.onSendToChat = options.onSendToChat;
     this.onSnapshotChanged = options.onSnapshotChanged;
+    this.auditChain = options.auditChain ?? false;
     this.panel = panel;
     this.ownsPanel = ownsPanel;
 
@@ -130,6 +134,7 @@ export class GridPanel {
           snapshot: this.snapshot,
           mode: this.mode,
           canSendToChat: !!this.onSendToChat,
+          auditChain: this.auditChain,
         });
         return;
       }
@@ -216,10 +221,12 @@ export class GridPanel {
       }
       case 'exportCsv': {
         const delim = this.getDelimiterSetting();
+        const safe = vscode.workspace.getConfiguration('gridflow').get<boolean>('csvSafeExport', true);
         const text = serializeCsv(
           message.snapshot.columns,
           message.snapshot.rows,
           delim === 'auto' ? ',' : delim,
+          { safe },
         );
         const uri = await vscode.window.showSaveDialog({
           filters: { 'CSV': ['csv'] },
@@ -230,9 +237,19 @@ export class GridPanel {
         vscode.window.showInformationMessage(`Exported ${message.snapshot.rows.length} rows.`);
         return;
       }
-      case 'requestHashCompletions': {
-        const items = await resolveHashCompletions(message.query);
-        this.post({ type: 'hashCompletions', query: message.query, items });
+      case 'exportWorkflowReport': {
+        const slug = slugify(message.snapshot.title ?? 'workflow');
+        const markdown = workflowToMarkdown(slug, message.snapshot);
+        const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+        const uri = await vscode.window.showSaveDialog({
+          defaultUri: folder ? vscode.Uri.joinPath(folder, `${slug}-report.md`) : undefined,
+          filters: { 'Markdown': ['md'] },
+          saveLabel: 'Export Report',
+        });
+        if (!uri) return;
+        await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(markdown));
+        const doc = await vscode.workspace.openTextDocument(uri);
+        await vscode.window.showTextDocument(doc, { preview: true });
         return;
       }
       case 'openFilePicker': {
@@ -276,11 +293,18 @@ const STATIC_PICKER_ITEMS: vscode.QuickPickItem[] = [
   { kind: vscode.QuickPickItemKind.Separator, label: 'Files' },
 ];
 
+const FILE_PICKER_EXCLUDES = '{**/node_modules/**,**/dist/**,**/out/**,**/.git/**}';
+const FILE_ITEMS_TTL_MS = 2000;
+const fileItemsCache = new Map<string, { at: number; items: vscode.QuickPickItem[] }>();
+
 async function buildFileItems(query: string): Promise<vscode.QuickPickItem[]> {
+  const cached = fileItemsCache.get(query);
+  if (cached && Date.now() - cached.at < FILE_ITEMS_TTL_MS) return cached.items;
+
   const pattern = query.length > 0 ? `**/*${query}*` : '**/*';
   try {
-    const uris = await vscode.workspace.findFiles(pattern, '**/node_modules/**', 200);
-    return uris.map((uri) => {
+    const uris = await vscode.workspace.findFiles(pattern, FILE_PICKER_EXCLUDES, 200);
+    const items = uris.map((uri) => {
       const rel = vscode.workspace.asRelativePath(uri, false);
       return {
         label: `$(file) ${rel.split('/').pop() ?? rel}`,
@@ -288,6 +312,8 @@ async function buildFileItems(query: string): Promise<vscode.QuickPickItem[]> {
         detail: `#file:${rel}`,
       };
     });
+    fileItemsCache.set(query, { at: Date.now(), items });
+    return items;
   } catch {
     return [];
   }

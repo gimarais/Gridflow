@@ -21,3 +21,4 @@ dist/**
 !dist/webview.js
 !dist/webview.css
 scripts/**
+cli/**

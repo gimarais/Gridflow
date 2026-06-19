@@ -72,6 +72,12 @@ export function Toolbar() {
     { label: 'Paste CSV text…', onClick: () => setPasteModal(true) },
     { separator: true },
     { label: 'Export to CSV…', onClick: () => post({ type: 'exportCsv', snapshot }) },
+    ...(isWorkflow
+      ? [
+          { separator: true } as MenuItem,
+          { label: 'Export audit report (Markdown)…', onClick: () => post({ type: 'exportWorkflowReport', snapshot }) },
+        ]
+      : []),
   ];
 
   return (

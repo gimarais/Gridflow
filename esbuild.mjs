@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
+const cliOnly = process.argv.includes('--cli-only');
 
 /**
  * Plugin to surface esbuild errors to the console during watch mode.
@@ -61,6 +62,21 @@ const webviewConfig = {
   },
 };
 
+// The standalone CLI: bundles cli/src + src/shared into one executable script.
+const cliConfig = {
+  entryPoints: ['cli/src/index.ts'],
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node18',
+  outfile: 'cli/dist/gridflow.js',
+  banner: { js: '#!/usr/bin/env node' },
+  sourcemap: false,
+  minify: production,
+  logLevel: 'silent',
+  plugins: [logRebuildPlugin],
+};
+
 function copyStatic() {
   ensureDir('dist/webview.css');
   // esbuild writes the CSS sibling automatically as dist/main.css? It emits dist/webview.css alongside webview.js
@@ -68,6 +84,11 @@ function copyStatic() {
 }
 
 async function run() {
+  if (cliOnly) {
+    await esbuild.build(cliConfig);
+    console.log('[esbuild] CLI build complete');
+    return;
+  }
   if (watch) {
     const [extCtx, webCtx] = await Promise.all([
       esbuild.context(extensionConfig),
@@ -76,7 +97,11 @@ async function run() {
     await Promise.all([extCtx.watch(), webCtx.watch()]);
     console.log('[esbuild] watching for changes…');
   } else {
-    await Promise.all([esbuild.build(extensionConfig), esbuild.build(webviewConfig)]);
+    await Promise.all([
+      esbuild.build(extensionConfig),
+      esbuild.build(webviewConfig),
+      esbuild.build(cliConfig),
+    ]);
     copyStatic();
     console.log('[esbuild] build complete');
   }

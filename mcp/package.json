@@ -1,0 +1,28 @@
+{
+  "name": "@gridflow/mcp",
+  "displayName": "GridFlow MCP HTTP Server",
+  "description": "Standalone HTTP server exposing GridFlow workflows via the MCP protocol for Claude and other MCP clients.",
+  "version": "0.3.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gimarais/Gridflow"
+  },
+  "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/server.js",
+      "require": "./dist/server.js",
+      "types": "./dist/server.d.ts"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist/server.js",
+    "dist/server.d.ts",
+    "README.md"
+  ]
+}

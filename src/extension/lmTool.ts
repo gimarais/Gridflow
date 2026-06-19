@@ -9,6 +9,8 @@ import {
   UpdateRowInput,
   GetWorkflowInput,
   AddRowsInput,
+  ReplayRowInput,
+  FanOutInput,
 } from './workflowOrchestrator';
 
 interface ToolInput {
@@ -71,6 +73,18 @@ export function registerLanguageModelTool(
     }),
   );
 
+  // ── Workflow: fan out a template row over a list (map primitive) ──
+  disposables.push(
+    vscode.lm.registerTool<FanOutInput>('gridflow_fanOut', {
+      async prepareInvocation(options) {
+        return { invocationMessage: `Fanning out ${options.input.items?.length ?? 0} task(s) in **${options.input.workflowId}**…` };
+      },
+      async invoke(options) {
+        return textResult(await orchestrator.fanOut(options.input));
+      },
+    }),
+  );
+
   // ── Workflow: update a row (agent reports progress) ──
   disposables.push(
     vscode.lm.registerTool<UpdateRowInput>('gridflow_updateRow', {
@@ -88,6 +102,18 @@ export function registerLanguageModelTool(
     vscode.lm.registerTool<GetWorkflowInput>('gridflow_getWorkflow', {
       async invoke(options) {
         return textResult(await orchestrator.getWorkflow(options.input));
+      },
+    }),
+  );
+
+  // ── Workflow: replay a single node (cheap failure recovery) ──
+  disposables.push(
+    vscode.lm.registerTool<ReplayRowInput>('gridflow_replayRow', {
+      async prepareInvocation(options) {
+        return { invocationMessage: `Replaying row in **${options.input.workflowId}**…` };
+      },
+      async invoke(options) {
+        return textResult(await orchestrator.replayRow(options.input));
       },
     }),
   );
